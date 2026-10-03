@@ -147,7 +147,7 @@ class Forwarder:
                 filter_keywords=task.filter_keywords, required_hashtags=task.required_hashtags,
                 source_topic_id=task.source_topic_id, target_topic_id=task.target_topic_id,
                 remove_hashtags=task.remove_hashtags, send_as_channel=task.send_as_channel,
-                deduplicate=task.deduplicate,
+                deduplicate=task.deduplicate, hide_source=task.hide_source,
             )
             if not result.success:
                 return "failed"

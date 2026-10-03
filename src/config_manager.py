@@ -5,6 +5,7 @@ from typing import Optional
 
 from .database import Database
 from .models import AppConfig, ForwardTask
+from .validators import validate_app_config, validate_task
 
 
 class ConfigManager:
@@ -35,6 +36,8 @@ class ConfigManager:
         return self._config
 
     def save_app_config(self, config, expected_revision=None):
+        config = deepcopy(config)
+        validate_app_config(config)
         values = dict(self._raw_app)
         values.update(config.to_dict())
         values.pop("tasks", None)
@@ -73,6 +76,7 @@ class ConfigManager:
         return self.load_config()
 
     def add_task(self, task):
+        validate_task(task)
         self.db.save_task(task.to_dict(), expected_revision=0)
         self.load_config()
 
@@ -80,13 +84,14 @@ class ConfigManager:
         self.db.delete_task(task_id, self._task_revisions.get(task_id, 0))
         self.load_config()
 
-    def update_task(self, task, expected_revision=None):
+    def update_task(self, task, expected_revision=None, source_reset=None):
+        validate_task(task)
         old = self._raw_tasks.get(task.task_id)
         if old is None:
             raise ValueError(f"Task {task.task_id} not found")
         values = dict(old)
         values.update(task.to_dict())
-        self.db.save_task(values, self._task_revisions[task.task_id] if expected_revision is None else expected_revision)
+        self.db.save_task(values, self._task_revisions[task.task_id] if expected_revision is None else expected_revision, source_reset)
         self.load_config()
 
     def get_task(self, task_id):

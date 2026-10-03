@@ -11,6 +11,10 @@ from telethon.errors import FloodWaitError
 from .telegram_client import TelegramClientWrapper
 from .models import ForwardResult
 from .dedup_tracker import DedupTracker
+from .errors import is_permanent_error
+from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError
+
+COPY_FALLBACK_ERRORS = (ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError)
 
 
 logger = logging.getLogger(__name__)
@@ -165,7 +169,8 @@ class MessageHandler:
                                     remove_hashtags: bool = False,
                                     send_as_channel: bool = False,
                                     deduplicate: bool = False,
-                                    source_topic_id: int = None) -> ForwardResult:
+                                    source_topic_id: int = None,
+                                    hide_source: bool = True) -> ForwardResult:
         """
         Forward a group of messages (single or album).
         Only forwards if there's media content.
@@ -211,8 +216,12 @@ class MessageHandler:
         # Determine send_as entity (target channel if send_as_channel is True)
         send_as = target_channel if send_as_channel else None
 
+        if not hide_source:
+            await self.client.send_existing_media(target_channel, [self.client.input_media_with_cover(m) for m in media_messages],
+                task_id=task_id, message_ids=[m.id for m in media_messages], source=source_channel, reply_to=target_topic_id)
+            result = ForwardResult(True, "forward", forwarded_count=len(media_messages))
         # Single message
-        if len(media_messages) == 1:
+        elif len(media_messages) == 1:
             result = await self._forward_single(media_messages[0], target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
         else:
             # Album (multiple media)
@@ -236,7 +245,7 @@ class MessageHandler:
                               send_as: int = None) -> ForwardResult:
         """Forward a single media message."""
         # Try copy first (using bot if available)
-        success = await self.copy_message(message, target_channel, caption_prefix, target_topic_id, hashtags_to_remove, send_as)
+        success = await self.copy_message(message, target_channel, caption_prefix, target_topic_id, hashtags_to_remove, send_as, task_id)
         if success:
             return ForwardResult(success=True, method="copy")
 
@@ -286,16 +295,17 @@ class MessageHandler:
                 send_as_entity = await self.client.get_entity(send_as)
                 send_kwargs["send_as"] = send_as_entity
 
-            await self.client.client.send_file(
-                target_entity,
-                media_list,
-                **send_kwargs
-            )
+            await self.client.send_existing_media(target_entity, media_list, task_id=task_id,
+                message_ids=[m.id for m in messages], caption=caption, reply_to=target_topic_id, send_as=send_as)
             logger.info(f"Sent album with {len(media_list)} items" + (f" to topic {target_topic_id}" if target_topic_id else "") + (f" as channel" if send_as else ""))
             return ForwardResult(success=True, method="copy_album")
         except FloodWaitError:
             raise
         except Exception as e:
+            if is_permanent_error(e):
+                raise
+            if not isinstance(e, COPY_FALLBACK_ERRORS):
+                raise
             logger.warning(f"Album copy failed: {e}, trying individual download")
             return await self._download_and_send_album(messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
 
@@ -389,6 +399,8 @@ class MessageHandler:
         except FloodWaitError:
             raise
         except Exception as e:
+            if is_permanent_error(e):
+                raise
             logger.error(f"Download album failed: {e}")
             return ForwardResult(success=False, method="download", error=str(e))
         finally:
@@ -429,7 +441,7 @@ class MessageHandler:
     async def copy_message(self, message: Message, target_channel: int,
                           caption_prefix: str = "", target_topic_id: int = None,
                           hashtags_to_remove: List[str] = None,
-                          send_as: int = None) -> bool:
+                          send_as: int = None, task_id: str = None) -> bool:
         """Copy message to target without showing source."""
         try:
             target_entity = await self.client.get_entity(target_channel)
@@ -448,15 +460,14 @@ class MessageHandler:
                 send_as_entity = await self.client.get_entity(send_as)
                 send_kwargs["send_as"] = send_as_entity
 
-            await self.client.client.send_file(
-                target_entity,
-                self.client.input_media_with_cover(message),
-                **send_kwargs
-            )
+            await self.client.send_existing_media(target_entity, self.client.input_media_with_cover(message),
+                task_id=task_id, message_ids=[message.id], caption=caption, reply_to=target_topic_id, send_as=send_as)
             return True
         except FloodWaitError:
             raise
         except Exception as e:
+            if is_permanent_error(e) or not isinstance(e, COPY_FALLBACK_ERRORS):
+                raise
             logger.warning(f"Copy message {message.id} failed: {e}")
             return False
 
@@ -504,6 +515,8 @@ class MessageHandler:
         except FloodWaitError:
             raise
         except Exception as e:
+            if is_permanent_error(e):
+                raise
             logger.error(f"Download and send failed: {e}")
             return False
         finally:

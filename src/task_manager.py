@@ -1,6 +1,7 @@
 """Task manager for Telegram Forwarder."""
 import logging
 import asyncio
+from functools import wraps
 from typing import Dict, List, Optional
 
 from .telegram_client import TelegramClientWrapper
@@ -10,9 +11,18 @@ from .config_manager import ConfigManager
 from .forwarder import Forwarder
 from .dedup_tracker import DedupTracker
 from .models import ForwardTask, TaskStatus, TaskProgress
+from .validators import validate_task
 
 
 logger = logging.getLogger(__name__)
+
+
+def serialized_action(method):
+    @wraps(method)
+    async def wrapped(self, task_id, *args, **kwargs):
+        async with self._operation_locks.setdefault(task_id, asyncio.Lock()):
+            return await method(self, task_id, *args, **kwargs)
+    return wrapped
 
 
 class TaskManager:
@@ -33,34 +43,39 @@ class TaskManager:
         min_free_disk_mb = getattr(config, "min_free_disk_mb", 1024) if config else 1024
         self.min_free_disk_mb = max(0, int(min_free_disk_mb))
         self._dedup_trackers: Dict[str, DedupTracker] = {}  # Per-task dedup trackers
-        
+
         # Set progress tracker on client for progress updates
         self.client.set_progress_tracker(progress_tracker)
-        
+
         self._forwarders: Dict[str, Forwarder] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._statuses: Dict[str, str] = {}  # task_id -> status
+        self._operation_locks = {}
 
     async def start_all_tasks(self) -> None:
         """Start all enabled tasks from configuration."""
         config = self.config_manager.get_config()
         if config is None:
             raise ValueError("Config not loaded")
-        
+
         for task in config.tasks:
             if task.enabled:
                 await self.start_task(task.task_id)
 
+    @serialized_action
     async def start_task(self, task_id: str) -> None:
         """Start a specific task by ID."""
         if task_id in self._tasks and not self._tasks[task_id].done():
             logger.warning(f"Task {task_id} is already running")
             return
-        
+
         task_config = self.config_manager.get_task(task_id)
         if task_config is None:
             raise ValueError(f"Task {task_id} not found in configuration")
-        
+        validate_task(task_config)
+        if not task_config.enabled:
+            raise ValueError("Enable the task before starting it")
+
         # Create forwarder for this task with its own dedup tracker
         dedup_tracker = None
         if task_config.deduplicate:
@@ -69,7 +84,7 @@ class TaskManager:
                     task_id, database=self.config_manager.db
                 )
             dedup_tracker = self._dedup_trackers[task_id]
-        
+
         message_handler = MessageHandler(
             self.client,
             self.temp_dir,
@@ -83,7 +98,7 @@ class TaskManager:
             group_semaphore=self._group_semaphore
         )
         self._forwarders[task_id] = forwarder
-        
+
         # Start task
         self._tasks[task_id] = asyncio.create_task(
             forwarder.run_task(task_config)
@@ -91,24 +106,27 @@ class TaskManager:
         self._statuses[task_id] = "running"
         logger.info(f"Started task {task_id}")
 
+    @serialized_action
     async def pause_task(self, task_id: str) -> None:
         """Pause a running task."""
-        if task_id not in self._forwarders:
-            raise ValueError(f"Task {task_id} not found")
-        
+        if task_id not in self._tasks or self._tasks[task_id].done():
+            raise ValueError("Only a running task can be paused")
+
         self._forwarders[task_id].pause()
         self._statuses[task_id] = "paused"
         logger.info(f"Paused task {task_id}")
 
+    @serialized_action
     async def resume_task(self, task_id: str) -> None:
         """Resume a paused task."""
-        if task_id not in self._forwarders:
-            raise ValueError(f"Task {task_id} not found")
-        
+        if task_id not in self._tasks or self._tasks[task_id].done() or not self._forwarders[task_id].is_paused:
+            raise ValueError("Only a paused task can be resumed; start stopped tasks")
+
         self._forwarders[task_id].resume()
         self._statuses[task_id] = "running"
         logger.info(f"Resumed task {task_id}")
 
+    @serialized_action
     async def stop_task(self, task_id: str) -> None:
         """Stop a specific task and preserve any active transfer as interrupted."""
         if task_id in self._forwarders:
@@ -123,11 +141,11 @@ class TaskManager:
                 await self._tasks[task_id]
             except asyncio.CancelledError:
                 pass
-        
+
         # Flush dedup records to disk
         if task_id in self._dedup_trackers:
             self._dedup_trackers[task_id].flush()
-        
+
         self._statuses[task_id] = "stopped"
         logger.info(f"Stopped task {task_id}")
 
@@ -141,7 +159,13 @@ class TaskManager:
         task_config = self.config_manager.get_task(task_id)
         progress = self.progress_tracker.get_task_progress(task_id)
         status = self._statuses.get(task_id, "stopped")
-        
+        runtime = self._tasks.get(task_id)
+        forwarder = self._forwarders.get(task_id)
+        if runtime and runtime.done():
+            status = "error" if forwarder and forwarder.error else "stopped"
+        elif runtime:
+            status = "paused" if forwarder.is_paused else "running"
+
         return TaskStatus(
             task_id=task_id,
             status=status,
@@ -154,7 +178,7 @@ class TaskManager:
         config = self.config_manager.get_config()
         if config is None:
             return []
-        
+
         return [self.get_task_status(task.task_id) for task in config.tasks]
 
     def has_running_tasks(self) -> bool:
@@ -168,11 +192,21 @@ class TaskManager:
         self.min_free_disk_mb = max(0, int(getattr(config, "min_free_disk_mb", self.min_free_disk_mb)))
         self._group_semaphore = asyncio.Semaphore(max(1, int(getattr(config, "max_concurrent_tasks", 1))))
 
-    def update_task(self, task: ForwardTask) -> None:
+    def update_task(self, task: ForwardTask, expected_revision=None, source_reset=None) -> None:
         """Update a task configuration; running tasks must be stopped first."""
         if task.task_id in self._tasks and not self._tasks[task.task_id].done():
             raise ValueError("Stop the task before editing its configuration")
-        self.config_manager.update_task(task)
+        old = self.config_manager.get_task(task.task_id)
+        source_changed = old and (old.source_channel, old.source_topic_id) != (task.source_channel, task.source_topic_id)
+        if source_changed and (not isinstance(source_reset, dict) or "last_message_id" not in source_reset or type(source_reset.get("clear_dedup")) is not bool):
+            raise ValueError("Changing source requires source_reset with last_message_id and clear_dedup")
+        if source_changed:
+            if type(source_reset["last_message_id"]) is not int or source_reset["last_message_id"] < 0:
+                raise ValueError("New source checkpoint must be a nonnegative integer")
+        self.config_manager.update_task(task, expected_revision, source_reset if source_changed else None)
+        if source_changed:
+            self.progress_tracker.load_progress()
+            self._dedup_trackers.pop(task.task_id, None)
         self.config_manager.db.log_operation(
             "update_task", task_id=task.task_id, after_data=task.to_dict()
         )
@@ -182,9 +216,15 @@ class TaskManager:
         """Set a checkpoint; callers must stop the task before using it."""
         if task_id in self._tasks and not self._tasks[task_id].done():
             raise ValueError("Stop the task before editing progress")
-        progress = self.progress_tracker.set_progress(
-            task_id, last_message_id, forwarded_count
-        )
+        if not self.config_manager.get_task(task_id):
+            raise ValueError("Task not found")
+        if type(last_message_id) is not int or last_message_id < 0:
+            raise ValueError("Checkpoint must be a nonnegative integer")
+        if forwarded_count is not None and (type(forwarded_count) is not int or forwarded_count < 0):
+            raise ValueError("Forwarded count must be a nonnegative integer")
+        count = self.progress_tracker.get_task_progress(task_id).forwarded_count if forwarded_count is None else forwarded_count
+        self.progress_tracker.reset_task_state(task_id)
+        progress = self.progress_tracker.set_progress(task_id, last_message_id, count)
         self.config_manager.db.log_operation(
             "set_progress", task_id=task_id, after_data=progress.to_dict()
         )

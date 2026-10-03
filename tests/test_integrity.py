@@ -12,6 +12,7 @@ from src.progress_tracker import ProgressTracker
 from src.message_handler import MessageHandler
 from src.media_artwork import MediaArtwork
 from tests.test_media_artwork import video, wrapper
+from telethon.errors import ChatForwardsRestrictedError
 
 
 @pytest.fixture
@@ -95,7 +96,7 @@ async def test_missing_album_item_does_not_advance_or_deduplicate(state, tmp_pat
     client = wrapper()
     client.set_progress_tracker(tracker)
     client.get_entity = AsyncMock(return_value="target")
-    client._client.send_file.side_effect = RuntimeError("copy forbidden")
+    client.send_existing_media = AsyncMock(side_effect=ChatForwardsRestrictedError(None))
     client.prepare_media_artwork = AsyncMock(side_effect=lambda message, *args: MediaArtwork(message))
     source = tmp_path / "video.mp4"
     source.write_bytes(b"media")

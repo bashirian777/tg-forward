@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -142,7 +142,7 @@ class Database:
 
     @staticmethod
     def _now() -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat()
 
     def get_metadata(self, key: str) -> Optional[str]:
         with self.connection() as db:
@@ -313,7 +313,7 @@ class Database:
             row = db.execute("SELECT data FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
             return json.loads(row["data"]) if row else None
 
-    def save_task(self, data: dict, expected_revision=None) -> None:
+    def save_task(self, data: dict, expected_revision=None, source_reset=None) -> None:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_revision(db, "tasks", data["task_id"], expected_revision)
@@ -322,6 +322,13 @@ class Database:
                 "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
                 (data["task_id"], json.dumps(data, ensure_ascii=False), self._now()),
             )
+            if source_reset is not None:
+                for table in ("processed_messages", "send_intents", "active_transfers", "task_progress"):
+                    db.execute(f"DELETE FROM {table} WHERE task_id=?", (data["task_id"],))
+                if source_reset["clear_dedup"]:
+                    db.execute("DELETE FROM dedup_records WHERE task_id=?", (data["task_id"],))
+                db.execute("INSERT INTO task_progress(task_id,last_message_id,updated_at) VALUES(?,?,?)",
+                           (data["task_id"], source_reset["last_message_id"], self._now()))
 
     def save_config(self, app_data: dict, tasks: Iterable[dict]) -> None:
         """Bootstrap/import a snapshot without deleting absent tasks or child rows."""

@@ -7,10 +7,12 @@ import secrets
 import shutil
 import time
 from pathlib import Path
+from copy import deepcopy
 from aiohttp import web
 
 from .models import ForwardTask
-from .validators import validate_channel_id, validate_delay_range, validate_task_id
+from .validators import validate_task, validate_app_config
+from .database import ConfigurationConflict
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +199,11 @@ class WebServer:
             "min_free_disk_mb": config.min_free_disk_mb,
             "web_password_configured": bool(config.web_password),
             "storage_source": "SQLite",
+            "revision": self.task_manager.config_manager._app_revision,
+            "web_auth_ttl_hours": config.web_auth_ttl_hours,
+            "web_port": config.web_port,
+            "download_workers": config.download_workers,
+            "upload_workers": config.upload_workers,
         })
 
     async def handle_api_task_action(self, request):
@@ -247,6 +254,7 @@ class WebServer:
             "transfer": self.task_manager.get_transfer(status.task_id),
             "dedup": self.task_manager.get_dedup_stats(status.task_id),
             "errors": self.task_manager.get_task_error_summary(status.task_id),
+            "revision": self.task_manager.config_manager._task_revisions.get(status.task_id, 0),
         }
 
     @staticmethod
@@ -264,51 +272,11 @@ class WebServer:
         values = dict(data)
         if task_id is not None:
             values["task_id"] = task_id
-        valid, error = validate_task_id(values.get("task_id"))
-        if not valid:
-            raise ValueError(error)
-        for key in ("source_channel", "target_channel"):
-            try:
-                values[key] = int(values[key])
-            except (KeyError, TypeError, ValueError):
-                raise ValueError(f"{key} must be an integer")
-            valid, error = validate_channel_id(values[key])
-            if not valid:
-                raise ValueError(error)
-        try:
-            values["min_delay"] = float(values.get("min_delay", 10.0))
-            values["max_delay"] = float(values.get("max_delay", 20.0))
-        except (TypeError, ValueError):
-            raise ValueError("Delay values must be numbers")
-        valid, error = validate_delay_range(values["min_delay"], values["max_delay"])
-        if not valid:
-            raise ValueError(error)
-        defaults = ForwardTask(
-            task_id=values["task_id"], source_channel=values["source_channel"],
-            target_channel=values["target_channel"], min_delay=values["min_delay"],
-            max_delay=values["max_delay"]
-        ).to_dict()
-        defaults.update(values)
-        for key in ("filter_keywords", "required_hashtags"):
-            if not isinstance(defaults[key], list) or not all(isinstance(item, str) for item in defaults[key]):
-                raise ValueError(f"{key} must be a string array")
-        for key in ("enabled", "hide_source", "remove_hashtags", "send_as_channel", "deduplicate"):
-            defaults[key] = bool(defaults.get(key, False))
-        if defaults.get("target_topic_id") is not None:
-            try:
-                defaults["target_topic_id"] = int(defaults["target_topic_id"])
-            except (TypeError, ValueError):
-                raise ValueError("target_topic_id must be an integer or null")
-            if defaults["target_topic_id"] < 1:
-                raise ValueError("target_topic_id must be a positive integer or null")
-        if defaults.get("source_topic_id") is not None:
-            try:
-                defaults["source_topic_id"] = int(defaults["source_topic_id"])
-            except (TypeError, ValueError):
-                raise ValueError("source_topic_id must be an integer or null")
-            if defaults["source_topic_id"] < 1:
-                raise ValueError("source_topic_id must be a positive integer or null")
-        return ForwardTask.from_dict(defaults)
+        values.setdefault("min_delay", 10.0)
+        values.setdefault("max_delay", 20.0)
+        task = ForwardTask(**values)
+        validate_task(task)
+        return task
 
     async def handle_api_create_task(self, request):
         if not self._is_authorized(request):
@@ -338,9 +306,13 @@ class WebServer:
             if not old:
                 return web.json_response({"error": "task_not_found"}, status=404)
             data = await self._json_body(request)
+            revision = data.pop("revision", None)
+            source_reset = data.pop("source_reset", None)
             task = self._task_from_data(data, task_id=task_id)
-            self.task_manager.update_task(task)
+            self.task_manager.update_task(task, revision, source_reset)
             return web.json_response({"success": True, "task": task.to_dict()})
+        except ConfigurationConflict as e:
+            return web.json_response({"error": str(e)}, status=409)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -468,29 +440,32 @@ class WebServer:
             current = self.task_manager.config_manager.get_config()
             if not current:
                 return web.json_response({"error": "config_unavailable"}, status=503)
-            if self.task_manager.has_running_tasks():
+            candidate = deepcopy(current)
+            allowed = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "web_password", "web_auth_ttl_hours", "web_port", "download_workers", "upload_workers"}
+            if set(data) - allowed - {"revision"}:
+                raise ValueError("Unknown configuration field")
+            for key in allowed & set(data):
+                if key == "web_password" and not data[key]:
+                    continue
+                setattr(candidate, key, data[key])
+            validate_app_config(candidate)
+            runtime_keys = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "download_workers", "upload_workers", "web_port"}
+            runtime_changed = any(getattr(candidate, key) != getattr(current, key) for key in runtime_keys)
+            if runtime_changed and self.task_manager.has_running_tasks():
                 return web.json_response({"error": "stop_all_tasks_before_editing_config"}, status=409)
-            if "temp_dir" in data:
-                current.temp_dir = str(data["temp_dir"])
-            if "temp_max_age_hours" in data:
-                current.temp_max_age_hours = max(0.0, float(data["temp_max_age_hours"]))
-            if "max_concurrent_tasks" in data:
-                current.max_concurrent_tasks = max(1, int(data["max_concurrent_tasks"]))
-            if "min_free_disk_mb" in data:
-                current.min_free_disk_mb = max(0, int(data["min_free_disk_mb"]))
-            if "web_password" in data and data["web_password"]:
-                current.web_password = str(data["web_password"])
-                self.web_password = current.web_password
+            self.task_manager.config_manager.save_app_config(candidate, data.get("revision"))
+            if candidate.web_password != self.web_password:
+                self.web_password = candidate.web_password
                 self._auth_tokens.clear()
-            self.task_manager.config_manager.save_config(current)
-            self.task_manager.refresh_runtime_limits()
+            self._auth_token_ttl = candidate.web_auth_ttl_hours * 3600
+            if runtime_changed:
+                self.task_manager.refresh_runtime_limits()
             self.task_manager.config_manager.db.log_operation("update_app_config", after_data={
-                "temp_dir": current.temp_dir,
-                "temp_max_age_hours": current.temp_max_age_hours,
-                "max_concurrent_tasks": current.max_concurrent_tasks,
-                "min_free_disk_mb": current.min_free_disk_mb,
+                key: getattr(candidate, key) for key in runtime_keys | {"web_auth_ttl_hours"}
             })
-            return web.json_response({"success": True})
+            return web.json_response({"success": True, "restart_required": candidate.web_port != self.port})
+        except ConfigurationConflict as e:
+            return web.json_response({"error": str(e)}, status=409)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 

@@ -14,6 +14,9 @@ from telethon.errors import (
 )
 
 from .media_artwork import MediaArtwork, artwork_sizes, normalize_artwork
+from .errors import is_permanent_error
+from .database import Database
+from .reliable_sender import ReliableSender
 
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,7 @@ def _safe_name(value: str) -> str:
 class TelegramClientWrapper:
     """Wrapper around Telethon client for Telegram operations."""
 
-    def __init__(self, api_id: int, api_hash: str, session_name: str = "forwarder", 
+    def __init__(self, api_id: int, api_hash: str, session_name: str = "forwarder",
                  proxy: dict = None):
         self.api_id = api_id
         self.api_hash = api_hash
@@ -49,14 +52,14 @@ class TelegramClientWrapper:
             }
             if self.proxy:
                 kwargs["proxy"] = self.proxy
-            
+
             self._client = TelegramClient(
-                self.session_name, 
-                self.api_id, 
+                self.session_name,
+                self.api_id,
                 self.api_hash,
                 **kwargs
             )
-        
+
         await self._client.connect()
         return self._client.is_connected()
 
@@ -71,21 +74,21 @@ class TelegramClientWrapper:
             return False
         return await self._client.is_user_authorized()
 
-    async def login(self, phone: str, code: Optional[str] = None, 
+    async def login(self, phone: str, code: Optional[str] = None,
                     password: Optional[str] = None) -> bool:
         """
         Login to Telegram with phone number.
         """
         if self._client is None:
             await self.connect()
-        
+
         if await self.is_authorized():
             return True
-        
+
         if code is None:
             await self._client.send_code_request(phone)
             return False
-        
+
         try:
             await self._client.sign_in(phone, code)
             return True
@@ -100,28 +103,28 @@ class TelegramClientWrapper:
         if channel_id < 0:
             abs_id = abs(channel_id)
             id_str = str(abs_id)
-            
+
             if id_str.startswith("100") and len(id_str) > 10:
                 peer_id = int(id_str[3:])
             else:
                 peer_id = abs_id
-            
+
             logger.debug(f"Trying to get entity: original={channel_id}, peer_id={peer_id}")
-            
+
             try:
                 entity = await self._client.get_entity(PeerChannel(peer_id))
                 logger.debug(f"Got entity via PeerChannel: {entity}")
                 return entity
             except Exception as e1:
                 logger.debug(f"PeerChannel({peer_id}) failed: {e1}")
-            
+
             try:
                 entity = await self._client.get_entity(PeerChat(peer_id))
                 logger.debug(f"Got entity via PeerChat: {entity}")
                 return entity
             except Exception as e2:
                 logger.debug(f"PeerChat({peer_id}) failed: {e2}")
-            
+
             try:
                 full_id = int(f"-100{peer_id}")
                 entity = await self._client.get_entity(full_id)
@@ -129,12 +132,12 @@ class TelegramClientWrapper:
                 return entity
             except Exception as e3:
                 logger.debug(f"Full ID {full_id} failed: {e3}")
-            
+
             return await self._client.get_entity(channel_id)
         else:
             return await self._client.get_entity(channel_id)
 
-    async def get_messages(self, channel_id: int, min_id: int = 0, 
+    async def get_messages(self, channel_id: int, min_id: int = 0,
                           limit: int = 100) -> List[Message]:
         """Get messages from a channel/group."""
         try:
@@ -153,7 +156,24 @@ class TelegramClientWrapper:
             logger.error(f"Error getting messages from {channel_id}: {e}")
             raise
 
-    async def forward_message(self, from_channel: int, to_channel: int, 
+    async def send_existing_media(self, entity, media, *, task_id=None, message_ids=None, caption=None, reply_to=None, send_as=None, source=None):
+        tracker = self._progress_tracker
+        if tracker and task_id and isinstance(getattr(tracker, "db", None), Database):
+            return await ReliableSender(self._client, tracker.db).send(
+                entity, media, task_id=task_id, message_ids=message_ids,
+                caption=caption, reply_to=reply_to, send_as=send_as, source=source)
+        if source:
+            await self._client.forward_messages(entity, message_ids, source)
+        else:
+            kwargs = {"caption": caption}
+            if reply_to:
+                kwargs["reply_to"] = reply_to
+            if send_as:
+                kwargs["send_as"] = await self.get_entity(send_as)
+            await self._client.send_file(entity, media, **kwargs)
+        return True
+
+    async def forward_message(self, from_channel: int, to_channel: int,
                              message_id: int) -> bool:
         """Forward a message from one channel to another."""
         try:
@@ -169,7 +189,7 @@ class TelegramClientWrapper:
                             total_files: int = 1, clear_progress: bool = True) -> Optional[str]:
         """
         Download media from a message with progress tracking.
-        
+
         Args:
             message: Message containing media
             path: Directory to save the file
@@ -177,9 +197,9 @@ class TelegramClientWrapper:
         """
         if not message.media:
             return None
-        
+
         os.makedirs(path, exist_ok=True)
-        
+
         # Get file size and name for progress
         total_size = 0
         filename = ""
@@ -194,11 +214,11 @@ class TelegramClientWrapper:
                 largest = message.media.photo.sizes[-1]
                 total_size = getattr(largest, 'size', 0)
             filename = "photo.jpg"
-        
+
         last_update = [0]
         message_id = message.id
         tracker = self._progress_tracker
-        
+
         def progress_callback(current: int, total: int):
             """Update download progress every 10 seconds."""
             now = time.time()
@@ -209,7 +229,7 @@ class TelegramClientWrapper:
                         task_id, current, total, filename, message_id,
                         file_index=file_index, total_files=total_files
                     )
-        
+
         logger.debug(f"Starting download: {filename}, size: {total_size}")
         try:
             file_path = await self._client.download_media(
@@ -243,7 +263,7 @@ class TelegramClientWrapper:
             logger.debug(f"Getting entity for send: {channel_id}")
             entity = await self.get_entity(channel_id)
             logger.debug(f"Got entity: {entity}")
-            
+
             if file:
                 logger.debug(f"Sending file: {file}")
                 await self._client.send_file(entity, file, caption=text)
@@ -271,7 +291,7 @@ class TelegramClientWrapper:
                                       cover: str = None) -> bool:
         """
         Send a file with metadata (duration, dimensions, thumb) and upload progress.
-        
+
         Args:
             channel_id: Target channel ID
             file_path: Path to file
@@ -286,7 +306,7 @@ class TelegramClientWrapper:
         tracker = self._progress_tracker
         try:
             entity = await self.get_entity(channel_id)
-            
+
             last_update = [0]
 
             def upload_progress(current: int, total: int):
@@ -298,7 +318,7 @@ class TelegramClientWrapper:
                         tracker.update_upload_progress(
                             task_id, current, total, filename
                         )
-            
+
             send_kwargs = {
                 "caption": caption,
                 "attributes": attributes,
@@ -311,23 +331,24 @@ class TelegramClientWrapper:
             if send_as:
                 send_as_entity = await self.get_entity(send_as)
                 send_kwargs["send_as"] = send_as_entity
-            
-            media = file_path
-            if cover:
-                media = await self.upload_media_for_album(
-                    file_path, attributes=attributes, thumb=thumb, cover=cover,
-                    task_id=task_id, message_id=message_id,
-                    cleanup_after_upload=False, entity=entity,
-                )
-            await self._client.send_file(entity, media, **send_kwargs)
-            
+
+            media = await self.upload_media_for_album(
+                file_path, attributes=attributes, thumb=thumb, cover=cover,
+                task_id=task_id, message_id=message_id,
+                cleanup_after_upload=False, entity=entity,
+            )
+            await self.send_existing_media(entity, media, task_id=task_id, message_ids=[message_id],
+                caption=caption, reply_to=reply_to, send_as=send_as)
+
             if tracker and task_id:
                 tracker.clear_upload_progress(task_id)
-            
+
             return True
         except FloodWaitError:
             raise
         except Exception as e:
+            if is_permanent_error(e):
+                raise
             if tracker and task_id:
                 tracker.record_error(
                     task_id, "telegram_upload_send", e,
@@ -558,7 +579,8 @@ class TelegramClientWrapper:
                     prepared_media.append(converted)
                 else:
                     prepared_media.append(media)
-            await self._client.send_file(entity, prepared_media, **send_kwargs)
+            await self.send_existing_media(entity, prepared_media, task_id=task_id,
+                message_ids=message_ids, caption=caption, reply_to=reply_to, send_as=send_as)
             if self._progress_tracker and task_id:
                 self._progress_tracker.clear_upload_progress(task_id)
             return True
@@ -584,7 +606,7 @@ class TelegramClientWrapper:
                                        cleanup_after_upload: bool = False) -> bool:
         """
         Send multiple files (album) with upload progress, preserving metadata.
-        
+
         Args:
             entity: Target entity
             file_paths: List of file paths
@@ -603,13 +625,13 @@ class TelegramClientWrapper:
             DocumentAttributeVideo, DocumentAttributeFilename
         )
         import mimetypes
-        
+
         try:
             last_update = [0]
             total_files = len(file_paths)
             tracker = self._progress_tracker
             current_file = [0]
-            
+
             def upload_progress(current: int, total: int):
                 now = time.time()
                 if now - last_update[0] >= 10 or current == total:
@@ -623,11 +645,11 @@ class TelegramClientWrapper:
                         )
                     if current == total:
                         current_file[0] = idx
-            
+
             # Upload every source separately when cleanup is requested, so each
             # source can be removed before the album request is sent.
             has_metadata = cleanup_after_upload or (attributes_list and any(attributes_list)) or (thumb_list and any(thumb_list))
-            
+
             send_kwargs = {
                 "caption": caption,
                 "supports_streaming": True
@@ -637,18 +659,18 @@ class TelegramClientWrapper:
             if send_as:
                 send_as_entity = await self.get_entity(send_as)
                 send_kwargs["send_as"] = send_as_entity
-            
+
             if has_metadata:
                 media_list = []
-                
+
                 for i, file_path in enumerate(file_paths):
                     attrs = attributes_list[i] if attributes_list and i < len(attributes_list) else None
                     thumb = thumb_list[i] if thumb_list and i < len(thumb_list) else None
-                    
+
                     mime_type, _ = mimetypes.guess_type(file_path)
                     if not mime_type:
                         mime_type = 'application/octet-stream'
-                    
+
                     is_photo = mime_type.startswith('image/') and not file_path.lower().endswith('.gif')
 
                     uploaded_file = await self._client.upload_file(
@@ -684,7 +706,7 @@ class TelegramClientWrapper:
                         force_file=False
                     )
                     media_list.append(media)
-                
+
                 await self._client.send_file(
                     entity,
                     media_list,
@@ -697,10 +719,10 @@ class TelegramClientWrapper:
                     file_paths,
                     **send_kwargs
                 )
-            
+
             if tracker and task_id:
                 tracker.clear_upload_progress(task_id)
-            
+
             return True
         except FloodWaitError:
             raise
