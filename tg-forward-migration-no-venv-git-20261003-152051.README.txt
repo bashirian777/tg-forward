@@ -1,0 +1,41 @@
+Telegram Forwarder migration bundle (without .venv and .git)
+Created: 2026-10-03 15:20 UTC
+Source path: /root/tools/tg-forward
+Service unit: /etc/systemd/system/tg-forward.service
+
+State at backup:
+- tg-forward.service was inactive and disabled before archiving.
+- config/forwarder.db integrity_check: ok
+- forwarder.session integrity_check: ok
+- bot_session.session integrity_check: ok
+- The archive includes source files and uncommitted working-tree content,
+  configuration, SQLite data, Telegram sessions, logs, JSON backups,
+  the empty temp directory, and the systemd service unit.
+- The temp directory contained no media files at archive time.
+- The archive intentionally excludes /root/tools/tg-forward/.venv and
+  /root/tools/tg-forward/.git.
+
+Security:
+- The archive contains Telegram login sessions, API credentials, bot credentials,
+  the web password, and message/task history. Keep it private and mode 0600.
+- Do not start the same Telegram session on both old and new servers.
+
+Restore on the destination server:
+1. Stop any existing instance:
+   systemctl stop tg-forward.service 2>/dev/null || true
+2. Verify the archive from its containing directory:
+   sha256sum -c tg-forward-migration-no-venv-git-20261003-152051.tar.gz.sha256
+3. Extract as root:
+   tar --acls --xattrs --numeric-owner -xzpf tg-forward-migration-no-venv-git-20261003-152051.tar.gz -C /
+4. Recreate the Python environment (Python 3.12 recommended):
+   cd /root/tools/tg-forward
+   python3.12 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+5. Reload and start:
+   systemctl daemon-reload
+   systemctl enable --now tg-forward.service
+6. Verify:
+   systemctl status tg-forward.service --no-pager
+   journalctl -u tg-forward.service -n 100 --no-pager
+
+The service unit expects the project to remain at /root/tools/tg-forward.

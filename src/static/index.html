@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Forwarder</title>
+  <link rel="stylesheet" href="/static/app.css?v=20260830-2">
+</head>
+<body>
+  <!-- 登录 -->
+  <div class="auth-gate" id="auth-gate" hidden>
+    <div class="auth-panel">
+      <div class="brand-mark lg"><span data-icon="lock"></span></div>
+      <h1>需要验证</h1>
+      <p>请输入 Web 管理密码以继续</p>
+      <form id="auth-form">
+        <label for="auth-password">管理密码</label>
+        <input id="auth-password" type="password" autocomplete="current-password" required>
+        <button class="btn primary block" type="submit" id="auth-submit">进入管理面板</button>
+        <p class="auth-error" id="auth-error" role="alert"></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app-content" hidden>
+    <div class="shell">
+      <div class="admin-layout">
+        <aside class="sidebar">
+          <div class="sidebar-brand">
+            <div class="brand-mark"><span data-icon="send"></span></div>
+            <div>
+              <b>Forwarder</b>
+              <span>管理控制台</span>
+            </div>
+          </div>
+          <nav class="sidebar-nav" aria-label="管理导航">
+            <button class="nav-btn active" data-target="overview"><span data-icon="grid"></span><span>总览</span></button>
+            <button class="nav-btn" data-target="tasks-section"><span data-icon="layers"></span><span>任务</span></button>
+            <button class="nav-btn" data-target="storage-section"><span data-icon="database"></span><span>资源</span></button>
+            <button class="nav-btn" data-target="config-section"><span data-icon="sliders"></span><span>配置</span></button>
+            <button class="nav-btn" data-target="logs-section"><span data-icon="terminal"></span><span>日志</span></button>
+          </nav>
+          <div class="sidebar-status">
+            <b><span class="dot"></span><span id="sidebar-health">服务正常</span></b>
+            <span id="sidebar-uptime">运行时间 —</span>
+          </div>
+        </aside>
+
+        <main class="main-area">
+          <div class="topbar">
+            <div class="brand">
+              <div class="brand-mark"><span data-icon="send"></span></div>
+              <div class="brand-meta">
+                <h1>Telegram Forwarder</h1>
+                <p>转发状态与管理面板</p>
+              </div>
+            </div>
+            <div class="topbar-actions">
+              <div class="live"><span class="dot"></span>LIVE</div>
+              <button class="btn primary" id="new-task-btn"><span data-icon="plus"></span><span>新建任务</span></button>
+              <button class="icon-btn" id="theme-btn" aria-label="切换主题" title="切换明暗主题">
+                <span class="icon-mode" data-icon="moon"></span>
+                <span class="icon-mode alt" data-icon="sun"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="banner" id="banner" hidden><span data-icon="alert"></span><span id="banner-text">连接失败，正在重试…</span></div>
+
+          <div class="stats" id="overview">
+            <div class="stat"><div class="stat-top"><span class="stat-icon" data-icon="layers"></span></div><div class="stat-num" id="stat-total">0</div><div class="stat-label">总任务</div></div>
+            <div class="stat green"><div class="stat-top"><span class="stat-icon" data-icon="play"></span></div><div class="stat-num" id="stat-running">0</div><div class="stat-label">运行中</div></div>
+            <div class="stat amber"><div class="stat-top"><span class="stat-icon" data-icon="pause"></span></div><div class="stat-num" id="stat-paused">0</div><div class="stat-label">已暂停</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-icon" data-icon="send"></span></div><div class="stat-num" id="stat-forwarded">0</div><div class="stat-label">总转发</div></div>
+          </div>
+
+          <div class="section" id="tasks-section"><span data-icon="layers"></span><span>任务列表</span><span class="count" id="task-count"></span></div>
+          <div class="controls">
+            <div class="search"><input id="task-search" type="search" placeholder="搜索备注、ID 或频道" autocomplete="off"><span data-icon="search"></span></div>
+            <div class="chips" id="task-chips">
+              <button class="chip active" data-filter="all">全部<span class="count" id="chip-all"></span></button>
+              <button class="chip" data-filter="running">运行中</button>
+              <button class="chip" data-filter="paused">已暂停</button>
+              <button class="chip" data-filter="stopped">已停止</button>
+              <button class="chip" data-filter="transfer">有传输</button>
+              <button class="chip" data-filter="disabled">已禁用</button>
+            </div>
+          </div>
+          <div class="list" id="tasks"></div>
+
+          <div class="section" id="storage-section"><span data-icon="database"></span><span>资源与系统</span></div>
+          <div class="system-grid">
+            <div class="card"><div class="config-item"><span class="k"><span data-icon="disk"></span>系统磁盘</span><span class="v" id="system-disk">—</span><span class="sub" id="system-disk-sub">—</span></div></div>
+            <div class="card"><div class="config-item"><span class="k"><span data-icon="folder"></span>临时目录</span><span class="v" id="system-temp">—</span><span class="sub" id="system-temp-sub">—</span></div></div>
+            <div class="card"><div class="config-item"><span class="k"><span data-icon="activity"></span>系统负载</span><span class="v" id="system-load">—</span><span class="sub" id="system-uptime">—</span></div></div>
+          </div>
+
+          <div class="section" id="config-section"><span data-icon="sliders"></span><span>运行配置</span></div>
+          <div class="config-panel">
+            <div class="config-item"><span class="k"><span data-icon="folder"></span>临时目录</span><span class="v" id="config-temp-dir">—</span></div>
+            <div class="config-item"><span class="k"><span data-icon="layers"></span>最大并发媒体组</span><span class="v" id="config-concurrency">—</span></div>
+            <div class="config-item"><span class="k"><span data-icon="disk"></span>最低剩余磁盘</span><span class="v" id="config-min-disk">—</span></div>
+            <div class="config-item"><span class="k"><span data-icon="clock"></span>临时文件保留周期</span><span class="v" id="config-cleanup">—</span></div>
+            <div class="config-item"><span class="k"><span data-icon="lock"></span>Web 管理密码</span><span class="v" id="config-password">—</span></div>
+            <div class="config-item"><span class="k"><span data-icon="database"></span>当前数据源</span><span class="v" id="config-storage-source">SQLite</span><span class="sub">JSON 仅用于首次迁移、备份和导出</span></div>
+            <div class="config-item action"><button class="btn" id="edit-config-btn"><span data-icon="edit"></span><span>编辑配置</span></button></div>
+            <div class="config-item action"><button class="btn" id="sync-json-btn"><span data-icon="database"></span><span>同步到 JSON</span></button></div>
+          </div>
+
+          <div class="section" id="logs-section"><span data-icon="terminal"></span><span>最近操作</span><span class="count" id="log-count"></span></div>
+          <div class="logs" id="logs"></div>
+
+          <footer>
+            <span>每 5 秒自动刷新</span>
+            <span>上次更新 <b id="last-updated">—</b></span>
+          </footer>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- 提示 -->
+  <div class="toast" id="toast" role="status" aria-live="polite"><span data-icon="check"></span><span id="toast-text"></span></div>
+
+  <!-- 任务弹窗：新建 / 编辑共用 -->
+  <div class="modal" id="task-modal">
+    <div class="modal-panel">
+      <div class="modal-head">
+        <div>
+          <h2 id="task-modal-title">新建任务</h2>
+          <div class="subtitle" id="task-modal-subtitle">创建后即可在列表中启动</div>
+        </div>
+        <button class="modal-close" data-close="task-modal" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <form id="task-form">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="task-form-id"><span data-icon="hash"></span>任务 ID</label>
+            <input id="task-form-id" required maxlength="64" placeholder="例如 daily_forward" autocomplete="off">
+            <span class="hint" id="task-id-hint">仅允许字母、数字、下划线和短横线</span>
+          </div>
+          <div class="form-field">
+            <label for="task-form-note"><span data-icon="pen"></span>备注</label>
+            <input id="task-form-note" maxlength="120" placeholder="便于识别的名称" autocomplete="off">
+          </div>
+          <div class="form-field">
+            <label for="task-form-source"><span data-icon="inbox"></span>源频道 ID</label>
+            <input id="task-form-source" type="number" required placeholder="-1001234567890">
+            <span class="hint">频道或群组通常使用负数 ID</span>
+          </div>
+          <div class="form-field">
+            <label for="task-form-source-topic"><span data-icon="message"></span>来源话题 ID</label>
+            <input id="task-form-source-topic" type="number" min="1" step="1" placeholder="可选，仅处理指定论坛话题">
+            <span class="hint">源论坛群组的话题根消息 ID，留空表示处理全部话题</span>
+          </div>
+          <div class="form-field">
+            <label for="task-form-target"><span data-icon="send"></span>目标频道 ID</label>
+            <input id="task-form-target" type="number" required placeholder="-1009876543210">
+            <span class="hint">频道或群组通常使用负数 ID</span>
+          </div>
+          <div class="form-field">
+            <label for="task-form-min"><span data-icon="clock"></span>最小延迟（秒）</label>
+            <input id="task-form-min" type="number" min="0" step="0.1" required>
+          </div>
+          <div class="form-field">
+            <label for="task-form-max"><span data-icon="clock"></span>最大延迟（秒）</label>
+            <input id="task-form-max" type="number" min="0" step="0.1" required>
+            <span class="hint" id="delay-hint"></span>
+          </div>
+          <div class="form-field">
+            <label for="task-form-prefix"><span data-icon="pen"></span>描述前缀</label>
+            <input id="task-form-prefix" placeholder="可选，转发描述前的文字" autocomplete="off">
+          </div>
+          <div class="form-field">
+            <label for="task-form-topic"><span data-icon="message"></span>目标话题 ID</label>
+            <input id="task-form-topic" type="number" placeholder="论坛群组话题 ID，可留空">
+          </div>
+          <div class="form-field full">
+            <label for="task-form-keywords"><span data-icon="filter"></span>过滤关键词（每行一个）</label>
+            <textarea id="task-form-keywords" placeholder="描述包含这些关键词时跳过转发"></textarea>
+          </div>
+          <div class="form-field full">
+            <label for="task-form-hashtags"><span data-icon="tag"></span>必须包含的 Hashtag（每行一个）</label>
+            <textarea id="task-form-hashtags" placeholder="至少包含其中一个才会转发"></textarea>
+          </div>
+          <div class="form-field full">
+            <div class="switches" id="task-switches">
+              <label class="switch"><input id="task-form-enabled" type="checkbox"><span class="track"></span><span class="copy"><span class="title">启用任务</span><span class="desc">关闭后任务不会自动启动</span></span></label>
+              <label class="switch"><input id="task-form-hide" type="checkbox" checked><span class="track"></span><span class="copy"><span class="title">隐藏来源</span><span class="desc">目标中不显示“转发自”来源</span></span></label>
+              <label class="switch" id="remove-switch"><input id="task-form-remove" type="checkbox"><span class="track"></span><span class="copy"><span class="title">删除已匹配 Hashtag</span><span class="desc">转发时移除上面填写的标签</span></span></label>
+              <label class="switch"><input id="task-form-send-as" type="checkbox"><span class="track"></span><span class="copy"><span class="title">以目标频道身份发送</span><span class="desc">需要机器人在目标频道拥有管理员权限</span></span></label>
+              <label class="switch"><input id="task-form-dedup" type="checkbox"><span class="track"></span><span class="copy"><span class="title">基于文件去重</span><span class="desc">避免重复转发同一媒体文件</span></span></label>
+            </div>
+          </div>
+        </div>
+        <div class="modal-error" id="task-form-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" data-close="task-modal">取消</button>
+          <button class="btn primary" type="submit" id="task-submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 断点弹窗：只做断点 -->
+  <div class="modal" id="checkpoint-modal">
+    <div class="modal-panel sm">
+      <div class="modal-head">
+        <div>
+          <h2>修改任务断点</h2>
+          <div class="subtitle">仅调整续传位置与统计，不会改动任务配置</div>
+        </div>
+        <button class="modal-close" data-close="checkpoint-modal" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <div class="checkpoint-identity">
+        <div class="task-avatar"><span data-icon="flag"></span></div>
+        <div>
+          <div class="task-title" id="checkpoint-task-name">—</div>
+          <div class="task-id" id="checkpoint-task-id">—</div>
+        </div>
+      </div>
+      <form id="checkpoint-form">
+        <div class="form-grid">
+          <div class="form-field full">
+            <label for="checkpoint-last-id"><span data-icon="flag"></span>last_message_id</label>
+            <input id="checkpoint-last-id" type="number" min="0" required>
+            <span class="hint">Telethon 的 min_id 语义：311 表示下一次从消息 312 开始。</span>
+          </div>
+          <div class="form-field full">
+            <label for="checkpoint-count"><span data-icon="send"></span>已转发数量</label>
+            <input id="checkpoint-count" type="number" min="0" required>
+            <span class="hint">仅用于统计展示，不影响续传位置。</span>
+          </div>
+        </div>
+        <div class="modal-error" id="checkpoint-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" data-close="checkpoint-modal">取消</button>
+          <button class="btn primary" type="submit" id="checkpoint-submit">保存断点</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 配置弹窗 -->
+  <div class="modal" id="config-modal">
+    <div class="modal-panel sm">
+      <div class="modal-head">
+        <div>
+          <h2>编辑运行配置</h2>
+          <div class="subtitle">任务运行时不可修改，需先停止全部任务</div>
+        </div>
+        <button class="modal-close" data-close="config-modal" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <form id="config-form">
+        <div class="form-grid">
+          <div class="form-field full"><label for="config-form-temp">临时目录</label><input id="config-form-temp" required><span class="hint">媒体处理期间用于落盘的工作目录</span></div>
+          <div class="form-field"><label for="config-form-concurrency">最大并发媒体组</label><input id="config-form-concurrency" type="number" min="1" required></div>
+          <div class="form-field"><label for="config-form-mindisk">最低剩余磁盘（MB）</label><input id="config-form-mindisk" type="number" min="0" required></div>
+          <div class="form-field full"><label for="config-form-cleanup">临时文件保留周期（小时）</label><input id="config-form-cleanup" type="number" min="0" step="0.1" required></div>
+          <div class="form-field full"><label for="config-form-password">Web 管理密码</label><input id="config-form-password" type="password" autocomplete="new-password" placeholder="留空表示不修改"><span class="hint">修改后现有登录会立即失效</span></div>
+        </div>
+        <div class="modal-error" id="config-form-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" data-close="config-modal">取消</button>
+          <button class="btn primary" type="submit" id="config-submit">保存配置</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="errors-modal">
+    <div class="modal-panel error-modal-panel">
+      <div class="modal-head">
+        <div>
+          <h2>传输错误</h2>
+          <div class="subtitle" id="errors-modal-subtitle">—</div>
+        </div>
+        <button class="modal-close" data-close="errors-modal" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <div class="error-list" id="error-list"></div>
+      <div class="modal-error" id="errors-modal-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn danger" id="clear-errors-btn"><span data-icon="trash"></span><span>清空错误记录</span></button>
+        <button type="button" class="btn ghost" data-close="errors-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+  <!-- 确认弹窗 -->
+  <div class="modal" id="confirm-modal">
+    <div class="modal-panel sm">
+      <div class="modal-head">
+        <div><h2 id="confirm-title">确认操作</h2></div>
+        <button class="modal-close" data-close="confirm-modal" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <p class="confirm-message" id="confirm-message"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" data-close="confirm-modal">取消</button>
+        <button type="button" class="btn danger" id="confirm-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=20260830-2" defer></script>
+</body>
+</html>

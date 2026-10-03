@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-forwarder"
+version = "0.1.0"
+description = "Telegram group/channel content forwarder with progress tracking"
+requires-python = ">=3.9"
+dependencies = [
+    "telethon>=1.44.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hypothesis>=6.92.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hypothesis]
+max_examples = 100

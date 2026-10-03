@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Telegram session files
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+
+# Config files with sensitive data
+config/config.json
+
+# Temp files
+temp/*
+!temp/.gitkeep
+
+# Runtime state and generated backups
+config/forwarder.db*
+config/legacy-backups/
+config/json-backups/
+config/.json-sync/
+config/backups/
+config/progress*.json
+config/dedup_*.json
+bot.pid
+nohup.out
+logs/
+tg-forward-migration-*.tar*
+.kiro

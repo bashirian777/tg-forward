@@ -1,0 +1,724 @@
+"""Telegram client wrapper using Telethon."""
+import asyncio
+import os
+import logging
+import re
+import time
+import uuid
+from typing import List, Optional, Any, Callable
+from telethon import TelegramClient, functions, types, utils
+from telethon.tl.types import Message, PeerChannel, PeerChat, InputMediaUploadedDocument, DocumentAttributeVideo, DocumentAttributeFilename
+from telethon.errors import (
+    SessionPasswordNeededError, FloodWaitError, FileReferenceExpiredError,
+    FilerefUpgradeNeededError,
+)
+
+from .media_artwork import MediaArtwork, artwork_sizes, normalize_artwork
+
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_name(value: str) -> str:
+    """Sanitize a string for use inside a file name."""
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', str(value))
+
+
+class TelegramClientWrapper:
+    """Wrapper around Telethon client for Telegram operations."""
+
+    def __init__(self, api_id: int, api_hash: str, session_name: str = "forwarder", 
+                 proxy: dict = None):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.session_name = session_name
+        self.proxy = proxy  # {"proxy_type": "socks5", "addr": "127.0.0.1", "port": 1080}
+        self._client: Optional[TelegramClient] = None
+        self._progress_tracker = None  # Will be set externally
+
+    def set_progress_tracker(self, tracker):
+        """Set progress tracker for download/upload progress updates."""
+        self._progress_tracker = tracker
+
+    async def connect(self) -> bool:
+        """Connect to Telegram servers."""
+        if self._client is None:
+            kwargs = {
+                "request_retries": 5,
+                "connection_retries": 5,
+            }
+            if self.proxy:
+                kwargs["proxy"] = self.proxy
+            
+            self._client = TelegramClient(
+                self.session_name, 
+                self.api_id, 
+                self.api_hash,
+                **kwargs
+            )
+        
+        await self._client.connect()
+        return self._client.is_connected()
+
+    async def disconnect(self) -> None:
+        """Disconnect from Telegram servers."""
+        if self._client:
+            await self._client.disconnect()
+
+    async def is_authorized(self) -> bool:
+        """Check if the client is authorized."""
+        if self._client is None:
+            return False
+        return await self._client.is_user_authorized()
+
+    async def login(self, phone: str, code: Optional[str] = None, 
+                    password: Optional[str] = None) -> bool:
+        """
+        Login to Telegram with phone number.
+        """
+        if self._client is None:
+            await self.connect()
+        
+        if await self.is_authorized():
+            return True
+        
+        if code is None:
+            await self._client.send_code_request(phone)
+            return False
+        
+        try:
+            await self._client.sign_in(phone, code)
+            return True
+        except SessionPasswordNeededError:
+            if password is None:
+                raise ValueError("2FA password required")
+            await self._client.sign_in(password=password)
+            return True
+
+    async def get_entity(self, channel_id: int) -> Any:
+        """Get entity (channel/group) information."""
+        if channel_id < 0:
+            abs_id = abs(channel_id)
+            id_str = str(abs_id)
+            
+            if id_str.startswith("100") and len(id_str) > 10:
+                peer_id = int(id_str[3:])
+            else:
+                peer_id = abs_id
+            
+            logger.debug(f"Trying to get entity: original={channel_id}, peer_id={peer_id}")
+            
+            try:
+                entity = await self._client.get_entity(PeerChannel(peer_id))
+                logger.debug(f"Got entity via PeerChannel: {entity}")
+                return entity
+            except Exception as e1:
+                logger.debug(f"PeerChannel({peer_id}) failed: {e1}")
+            
+            try:
+                entity = await self._client.get_entity(PeerChat(peer_id))
+                logger.debug(f"Got entity via PeerChat: {entity}")
+                return entity
+            except Exception as e2:
+                logger.debug(f"PeerChat({peer_id}) failed: {e2}")
+            
+            try:
+                full_id = int(f"-100{peer_id}")
+                entity = await self._client.get_entity(full_id)
+                logger.debug(f"Got entity via full_id: {entity}")
+                return entity
+            except Exception as e3:
+                logger.debug(f"Full ID {full_id} failed: {e3}")
+            
+            return await self._client.get_entity(channel_id)
+        else:
+            return await self._client.get_entity(channel_id)
+
+    async def get_messages(self, channel_id: int, min_id: int = 0, 
+                          limit: int = 100) -> List[Message]:
+        """Get messages from a channel/group."""
+        try:
+            logger.debug(f"Getting entity for channel {channel_id}")
+            entity = await self.get_entity(channel_id)
+            logger.debug(f"Fetching messages, min_id={min_id}, limit={limit}")
+            messages = await self._client.get_messages(
+                entity,
+                limit=limit,
+                min_id=min_id,
+                reverse=True
+            )
+            logger.debug(f"Got {len(messages)} messages")
+            return list(messages)
+        except Exception as e:
+            logger.error(f"Error getting messages from {channel_id}: {e}")
+            raise
+
+    async def forward_message(self, from_channel: int, to_channel: int, 
+                             message_id: int) -> bool:
+        """Forward a message from one channel to another."""
+        try:
+            from_entity = await self.get_entity(from_channel)
+            to_entity = await self.get_entity(to_channel)
+            await self._client.forward_messages(to_entity, message_id, from_entity)
+            return True
+        except Exception:
+            return False
+
+    async def download_media(self, message: Message, path: str = "temp",
+                            task_id: str = None, file_index: int = 1,
+                            total_files: int = 1, clear_progress: bool = True) -> Optional[str]:
+        """
+        Download media from a message with progress tracking.
+        
+        Args:
+            message: Message containing media
+            path: Directory to save the file
+            task_id: Task ID for progress tracking
+        """
+        if not message.media:
+            return None
+        
+        os.makedirs(path, exist_ok=True)
+        
+        # Get file size and name for progress
+        total_size = 0
+        filename = ""
+        if hasattr(message.media, 'document') and message.media.document:
+            total_size = message.media.document.size
+            for attr in message.media.document.attributes:
+                if hasattr(attr, 'file_name'):
+                    filename = attr.file_name
+                    break
+        elif hasattr(message.media, 'photo') and message.media.photo:
+            if message.media.photo.sizes:
+                largest = message.media.photo.sizes[-1]
+                total_size = getattr(largest, 'size', 0)
+            filename = "photo.jpg"
+        
+        last_update = [0]
+        message_id = message.id
+        tracker = self._progress_tracker
+        
+        def progress_callback(current: int, total: int):
+            """Update download progress every 10 seconds."""
+            now = time.time()
+            if now - last_update[0] >= 10 or current == total:
+                last_update[0] = now
+                if tracker and task_id:
+                    tracker.update_download_progress(
+                        task_id, current, total, filename, message_id,
+                        file_index=file_index, total_files=total_files
+                    )
+        
+        logger.debug(f"Starting download: {filename}, size: {total_size}")
+        try:
+            file_path = await self._client.download_media(
+                message,
+                file=path,
+                progress_callback=progress_callback
+            )
+        except FloodWaitError:
+            raise
+        except Exception as error:
+            if tracker and task_id:
+                tracker.record_error(
+                    task_id, "telegram_download", error,
+                    message_id=message_id, file_index=file_index,
+                    filename=filename,
+                )
+            logger.error(f"Download media {message_id} failed: {error}")
+            raise
+
+        # Clear download progress when done
+        if tracker and task_id and clear_progress:
+            tracker.clear_download_progress(task_id)
+
+        logger.debug(f"Download complete: {file_path}")
+        return file_path
+
+    async def send_message(self, channel_id: int, text: Optional[str] = None,
+                          file: Optional[str] = None) -> bool:
+        """Send a message or file to a channel."""
+        try:
+            logger.debug(f"Getting entity for send: {channel_id}")
+            entity = await self.get_entity(channel_id)
+            logger.debug(f"Got entity: {entity}")
+            
+            if file:
+                logger.debug(f"Sending file: {file}")
+                await self._client.send_file(entity, file, caption=text)
+                logger.debug("File sent successfully")
+            elif text:
+                logger.debug(f"Sending text: {text[:50]}...")
+                await self._client.send_message(entity, text)
+                logger.debug("Text sent successfully")
+            else:
+                logger.warning("No file or text to send")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Send message failed: {e}")
+            return False
+
+    async def send_file_with_metadata(self, channel_id: int, file_path: str,
+                                      caption: Optional[str] = None,
+                                      attributes: list = None,
+                                      thumb: str = None,
+                                      task_id: str = None,
+                                      reply_to: int = None,
+                                      send_as: int = None,
+                                      message_id: int = None,
+                                      cover: str = None) -> bool:
+        """
+        Send a file with metadata (duration, dimensions, thumb) and upload progress.
+        
+        Args:
+            channel_id: Target channel ID
+            file_path: Path to file
+            caption: Caption text
+            attributes: File attributes (duration, dimensions, etc.)
+            thumb: Thumbnail path
+            task_id: Task ID for progress tracking
+            reply_to: Topic ID for forum groups
+            send_as: Channel ID to send as (for sending as channel identity)
+        """
+        filename = os.path.basename(file_path)
+        tracker = self._progress_tracker
+        try:
+            entity = await self.get_entity(channel_id)
+            
+            last_update = [0]
+
+            def upload_progress(current: int, total: int):
+                """Update upload progress every 10 seconds."""
+                now = time.time()
+                if now - last_update[0] >= 10 or current == total:
+                    last_update[0] = now
+                    if tracker and task_id:
+                        tracker.update_upload_progress(
+                            task_id, current, total, filename
+                        )
+            
+            send_kwargs = {
+                "caption": caption,
+                "attributes": attributes,
+                "thumb": thumb,
+                "progress_callback": upload_progress,
+                "supports_streaming": True
+            }
+            if reply_to:
+                send_kwargs["reply_to"] = reply_to
+            if send_as:
+                send_as_entity = await self.get_entity(send_as)
+                send_kwargs["send_as"] = send_as_entity
+            
+            media = file_path
+            if cover:
+                media = await self.upload_media_for_album(
+                    file_path, attributes=attributes, thumb=thumb, cover=cover,
+                    task_id=task_id, message_id=message_id,
+                    cleanup_after_upload=False, entity=entity,
+                )
+            await self._client.send_file(entity, media, **send_kwargs)
+            
+            if tracker and task_id:
+                tracker.clear_upload_progress(task_id)
+            
+            return True
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            if tracker and task_id:
+                tracker.record_error(
+                    task_id, "telegram_upload_send", e,
+                    message_id=message_id, filename=filename,
+                )
+            logger.error(f"Send file with metadata failed: {e}")
+            return False
+
+    @staticmethod
+    def input_media_with_cover(message: Message):
+        """Preserve a separate video cover when copying existing Telegram media."""
+        media = utils.get_input_media(message.media)
+        cover = getattr(message.media, "video_cover", None)
+        if cover and isinstance(media, types.InputMediaDocument):
+            media.video_cover = utils.get_input_photo(cover)
+            media.video_timestamp = getattr(message.media, "video_timestamp", None)
+        return media
+
+    async def _refresh_artwork_message(self, message: Message) -> Message:
+        """Refresh references without pairing artwork with an edited video."""
+        try:
+            peer = message.input_chat or message.chat_id
+            if peer is None:
+                return message
+            fresh = await self._client.get_messages(peer, ids=message.id)
+            original_doc = getattr(message.media, "document", None)
+            fresh_doc = getattr(getattr(fresh, "media", None), "document", None)
+            if original_doc and fresh_doc and original_doc.id == fresh_doc.id:
+                return fresh
+            logger.warning("Artwork message %s is missing or its media changed", message.id)
+        except FloodWaitError:
+            raise
+        except Exception as error:
+            logger.warning("Could not refresh artwork message %s: %s", message.id, error)
+        return message
+
+    async def _download_artwork(self, message: Message, thumbnail: bool):
+        """Download static artwork, refreshing an expired reference once."""
+        kind = "thumbnail" if thumbnail else "video cover"
+        for attempt in range(2):
+            if thumbnail:
+                document = getattr(message.media, "document", None)
+                media = message
+                sizes = getattr(document, "thumbs", None)
+            else:
+                media = getattr(message.media, "video_cover", None)
+                sizes = getattr(media, "sizes", None)
+            expired = False
+            for size in artwork_sizes(sizes, thumbnail):
+                try:
+                    data = await self._client.download_media(media, file=bytes, thumb=size)
+                    if data:
+                        data = await asyncio.to_thread(normalize_artwork, data, thumbnail)
+                        return message, data
+                except FloodWaitError:
+                    raise
+                except (FileReferenceExpiredError, FilerefUpgradeNeededError) as error:
+                    logger.warning("Expired %s reference for message %s: %s", kind, message.id, error)
+                    if attempt == 0:
+                        expired = True
+                        break
+                    # Embedded/smaller previews may still work without a reference.
+                except Exception as error:
+                    logger.warning(
+                        "Could not download/validate %s for message %s (size %s): %s",
+                        kind, message.id, size.type, error,
+                    )
+            if not expired:
+                break
+            message = await self._refresh_artwork_message(message)
+        return message, None
+
+    async def prepare_media_artwork(self, message: Message, path: str = "temp",
+                                    task_id: str = None) -> MediaArtwork:
+        """Cache original artwork before downloading a potentially large video."""
+        artwork = MediaArtwork(message)
+        document = getattr(message.media, "document", None)
+        if not document:
+            return artwork
+        artwork.message = await self._refresh_artwork_message(message)
+        os.makedirs(path, exist_ok=True)
+        prefix = f"{_safe_name(task_id or 'default')}_{message.id}_{uuid.uuid4().hex}"
+        # Track paths before writing so cancellation and failed writes clean up too.
+        pending_paths = []
+        try:
+            artwork.message, cover_data = await self._download_artwork(artwork.message, False)
+            if cover_data:
+                artwork.cover = os.path.join(path, f"cover_{prefix}.jpg")
+                pending_paths.append(artwork.cover)
+                with open(artwork.cover, "wb") as handle:
+                    handle.write(cover_data)
+
+            artwork.message, thumb_data = await self._download_artwork(artwork.message, True)
+            if not thumb_data and cover_data:
+                thumb_data = await asyncio.to_thread(normalize_artwork, cover_data, True)
+            if thumb_data:
+                artwork.thumb = os.path.join(path, f"thumb_{prefix}.jpg")
+                pending_paths.append(artwork.thumb)
+                with open(artwork.thumb, "wb") as handle:
+                    handle.write(thumb_data)
+            if not artwork.paths and document.mime_type.startswith("video/"):
+                logger.warning("No usable original artwork for video message %s", message.id)
+            return artwork
+        except BaseException:
+            for filename in pending_paths:
+                self._cleanup_uploaded_source(filename)
+            raise
+
+    async def _upload_video_cover(self, entity, cover: str):
+        uploaded = await self._client.upload_file(cover)
+        result = await self._client(functions.messages.UploadMediaRequest(
+            entity, types.InputMediaUploadedPhoto(file=uploaded),
+        ))
+        return utils.get_input_photo(result.photo)
+
+    async def upload_media_for_album(self, file_path: str,
+                                      attributes=None,
+                                      thumb: str = None,
+                                      task_id: str = None,
+                                      file_index: int = 1,
+                                      total_files: int = 1,
+                                      cleanup_after_upload: bool = True,
+                                      message_id: int = None,
+                                      cover: str = None,
+                                      entity=None):
+        """Upload one album item and optionally remove its source files."""
+        from telethon.tl.types import (
+            InputMediaUploadedDocument, InputMediaUploadedPhoto,
+            DocumentAttributeFilename
+        )
+        import mimetypes
+
+        last_update = [0]
+        tracker = self._progress_tracker
+        filename = os.path.basename(file_path)
+
+        def upload_progress(current: int, total: int):
+            now = time.time()
+            if now - last_update[0] >= 10 or current == total:
+                last_update[0] = now
+                if tracker and task_id:
+                    tracker.update_upload_progress(
+                        task_id, current, total, filename,
+                        file_index=file_index, total_files=total_files
+                    )
+
+
+        try:
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if not mime_type:
+                mime_type = "application/octet-stream"
+            is_photo = mime_type.startswith("image/") and not file_path.lower().endswith(".gif")
+
+            uploaded_file = await self._client.upload_file(
+                file_path,
+                progress_callback=upload_progress
+            )
+            if cleanup_after_upload:
+                self._cleanup_uploaded_source(file_path)
+
+            uploaded_thumb = None
+            if thumb and os.path.exists(thumb):
+                uploaded_thumb = await self._client.upload_file(thumb)
+                if cleanup_after_upload:
+                    self._cleanup_uploaded_source(thumb)
+
+            if is_photo and not attributes:
+                return InputMediaUploadedPhoto(file=uploaded_file)
+
+            file_attrs = list(attributes) if attributes else []
+            has_filename = any(isinstance(a, DocumentAttributeFilename) for a in file_attrs)
+            if not has_filename:
+                file_attrs.append(DocumentAttributeFilename(os.path.basename(file_path)))
+
+            uploaded_cover = None
+            if cover:
+                uploaded_cover = await self._upload_video_cover(entity, cover)
+                if cleanup_after_upload:
+                    self._cleanup_uploaded_source(cover)
+
+            return InputMediaUploadedDocument(
+                file=uploaded_file,
+                mime_type=mime_type,
+                attributes=file_attrs,
+                thumb=uploaded_thumb,
+                video_cover=uploaded_cover,
+                force_file=False
+            )
+        except FloodWaitError:
+            raise
+        except Exception as error:
+            if tracker and task_id:
+                tracker.record_error(
+                    task_id, "telegram_album_upload", error,
+                    message_id=message_id, file_index=file_index,
+                    filename=filename,
+                )
+            logger.error(f"Upload album file {filename} failed: {error}")
+            raise
+
+    async def send_uploaded_album(self, entity, media_list: list,
+                                  caption: Optional[str] = None,
+                                  task_id: str = None,
+                                  reply_to: int = None,
+                                  send_as: int = None,
+                                  message_ids: list = None) -> bool:
+        """Send already-uploaded Telegram media as one album."""
+        try:
+            send_kwargs = {
+                "caption": caption,
+                "supports_streaming": True
+            }
+            if reply_to:
+                send_kwargs["reply_to"] = reply_to
+            if send_as:
+                send_as_entity = await self.get_entity(send_as)
+                send_kwargs["send_as"] = send_as_entity
+
+            # Telethon's album conversion drops video_cover. Convert explicitly
+            # and restore it on InputMediaDocument before passing the album on.
+            prepared_media = []
+            for media in media_list:
+                if isinstance(media, types.InputMediaUploadedDocument) and media.video_cover:
+                    result = await self._client(functions.messages.UploadMediaRequest(entity, media))
+                    converted = utils.get_input_media(result.document, supports_streaming=True)
+                    converted.video_cover = media.video_cover
+                    converted.video_timestamp = media.video_timestamp
+                    prepared_media.append(converted)
+                else:
+                    prepared_media.append(media)
+            await self._client.send_file(entity, prepared_media, **send_kwargs)
+            if self._progress_tracker and task_id:
+                self._progress_tracker.clear_upload_progress(task_id)
+            return True
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            if self._progress_tracker and task_id:
+                self._progress_tracker.record_error(
+                    task_id, "telegram_album_send", e,
+                    message_id=(message_ids or [None])[0],
+                    details="message_ids=" + repr(message_ids or []),
+                )
+            logger.error(f"Send uploaded album failed: {e}")
+            raise
+
+    async def send_files_with_progress(self, entity, file_paths: list,
+                                       caption: Optional[str] = None,
+                                       attributes_list: list = None,
+                                       thumb_list: list = None,
+                                       task_id: str = None,
+                                       reply_to: int = None,
+                                       send_as: int = None,
+                                       cleanup_after_upload: bool = False) -> bool:
+        """
+        Send multiple files (album) with upload progress, preserving metadata.
+        
+        Args:
+            entity: Target entity
+            file_paths: List of file paths
+            caption: Caption text
+            attributes_list: List of attributes for each file
+            thumb_list: List of thumbnail paths for each file
+            task_id: Task ID for progress tracking
+            reply_to: Topic ID for forum groups
+            send_as: Channel ID to send as (for sending as channel identity)
+            cleanup_after_upload: Delete each source file after Telegram accepts
+                its upload. This keeps album staging bounded when source files
+                are on a remote-backed mount.
+        """
+        from telethon.tl.types import (
+            InputMediaUploadedDocument, InputMediaUploadedPhoto,
+            DocumentAttributeVideo, DocumentAttributeFilename
+        )
+        import mimetypes
+        
+        try:
+            last_update = [0]
+            total_files = len(file_paths)
+            tracker = self._progress_tracker
+            current_file = [0]
+            
+            def upload_progress(current: int, total: int):
+                now = time.time()
+                if now - last_update[0] >= 10 or current == total:
+                    last_update[0] = now
+                    # First file has index 1; advance after a file completes.
+                    idx = min(current_file[0] + 1, total_files)
+                    if tracker and task_id:
+                        tracker.update_upload_progress(
+                            task_id, current, total,
+                            f"file {idx}/{total_files}"
+                        )
+                    if current == total:
+                        current_file[0] = idx
+            
+            # Upload every source separately when cleanup is requested, so each
+            # source can be removed before the album request is sent.
+            has_metadata = cleanup_after_upload or (attributes_list and any(attributes_list)) or (thumb_list and any(thumb_list))
+            
+            send_kwargs = {
+                "caption": caption,
+                "supports_streaming": True
+            }
+            if reply_to:
+                send_kwargs["reply_to"] = reply_to
+            if send_as:
+                send_as_entity = await self.get_entity(send_as)
+                send_kwargs["send_as"] = send_as_entity
+            
+            if has_metadata:
+                media_list = []
+                
+                for i, file_path in enumerate(file_paths):
+                    attrs = attributes_list[i] if attributes_list and i < len(attributes_list) else None
+                    thumb = thumb_list[i] if thumb_list and i < len(thumb_list) else None
+                    
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    if not mime_type:
+                        mime_type = 'application/octet-stream'
+                    
+                    is_photo = mime_type.startswith('image/') and not file_path.lower().endswith('.gif')
+
+                    uploaded_file = await self._client.upload_file(
+                        file_path,
+                        progress_callback=upload_progress
+                    )
+                    if cleanup_after_upload:
+                        self._cleanup_uploaded_source(file_path)
+
+                    uploaded_thumb = None
+                    if thumb and os.path.exists(thumb):
+                        uploaded_thumb = await self._client.upload_file(thumb)
+                        if cleanup_after_upload:
+                            self._cleanup_uploaded_source(thumb)
+
+                    if is_photo and not attrs:
+                        media_list.append(InputMediaUploadedPhoto(file=uploaded_file))
+                        continue
+
+                    file_attrs = []
+                    if attrs:
+                        file_attrs = list(attrs)
+
+                    has_filename = any(isinstance(a, DocumentAttributeFilename) for a in file_attrs)
+                    if not has_filename:
+                        file_attrs.append(DocumentAttributeFilename(os.path.basename(file_path)))
+
+                    media = InputMediaUploadedDocument(
+                        file=uploaded_file,
+                        mime_type=mime_type,
+                        attributes=file_attrs,
+                        thumb=uploaded_thumb,
+                        force_file=False
+                    )
+                    media_list.append(media)
+                
+                await self._client.send_file(
+                    entity,
+                    media_list,
+                    **send_kwargs
+                )
+            else:
+                send_kwargs["progress_callback"] = upload_progress
+                await self._client.send_file(
+                    entity,
+                    file_paths,
+                    **send_kwargs
+                )
+            
+            if tracker and task_id:
+                tracker.clear_upload_progress(task_id)
+            
+            return True
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            logger.error(f"Send files failed: {e}")
+            raise
+
+    @staticmethod
+    def _cleanup_uploaded_source(file_path: str) -> None:
+        """Remove a source file after it has been uploaded to Telegram."""
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+                logger.debug("Removed uploaded source file: %s", file_path)
+        except OSError as e:
+            logger.warning("Failed to remove uploaded source file %s: %s", file_path, e)
+
+    @property
+    def client(self) -> Optional[TelegramClient]:
+        """Get the underlying Telethon client."""
+        return self._client
