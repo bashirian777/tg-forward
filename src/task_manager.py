@@ -47,6 +47,11 @@ class TaskManager:
 
         # Set progress tracker on client for progress updates
         self.client.set_progress_tracker(progress_tracker)
+        self.client.download_workers = getattr(config, "download_workers", 4)
+        self.client.upload_workers = getattr(config, "upload_workers", 4)
+        # Only one fallback chain reserves local disk at a time. Parallelism
+        # remains inside a file, keeping aggregate disk checks race-free.
+        self.client.disk_semaphore = asyncio.Semaphore(1)
 
         self._forwarders: Dict[str, Forwarder] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -192,6 +197,8 @@ class TaskManager:
         self.temp_dir = getattr(config, "temp_dir", self.temp_dir) or self.temp_dir
         self.min_free_disk_mb = max(0, int(getattr(config, "min_free_disk_mb", self.min_free_disk_mb)))
         self._group_semaphore = asyncio.Semaphore(max(1, int(getattr(config, "max_concurrent_tasks", 1))))
+        self.client.download_workers = config.download_workers
+        self.client.upload_workers = config.upload_workers
 
     def update_task(self, task: ForwardTask, expected_revision=None, source_reset=None) -> None:
         """Update a task configuration; running tasks must be stopped first."""

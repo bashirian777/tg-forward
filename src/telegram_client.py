@@ -16,7 +16,10 @@ from telethon.errors import (
 from .media_artwork import MediaArtwork, artwork_sizes, normalize_artwork
 from .errors import is_permanent_error
 from .database import Database
-from .reliable_sender import ReliableSender
+from .reliable_sender import ReliableSender, encode_media, decode_media
+from .transfer import ParallelTransfer
+from .workspace import atomic_json, OWNER_FILE
+from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,8 @@ class TelegramClientWrapper:
         self.proxy = proxy  # {"proxy_type": "socks5", "addr": "127.0.0.1", "port": 1080}
         self._client: Optional[TelegramClient] = None
         self._progress_tracker = None  # Will be set externally
+        self.download_workers = 4
+        self.upload_workers = 4
 
     def set_progress_tracker(self, tracker):
         """Set progress tracker for download/upload progress updates."""
@@ -237,12 +242,34 @@ class TelegramClientWrapper:
             mime = getattr(getattr(message.media, "document", None), "mime_type", "image/jpeg")
             filename += mimetypes.guess_extension(mime) or ".bin"
         destination = os.path.join(path, f"{message.id}_{filename}")
+        started = time.monotonic()
         try:
-            file_path = await self._client.download_media(
-                message,
-                file=destination,
-                progress_callback=progress_callback
-            )
+            document = getattr(message.media, "document", None)
+            if document and isinstance(getattr(tracker, "db", None), Database):
+                for attempt in range(2):
+                    try:
+                        file_path = await ParallelTransfer(self._client, self.download_workers, self.upload_workers).download(message, destination, progress_callback)
+                        break
+                    except (FileReferenceExpiredError, FilerefUpgradeNeededError):
+                        if attempt:
+                            raise
+                        fresh = await self._refresh_artwork_message(message)
+                        if fresh.media.document.id != document.id:
+                            raise
+                        message = fresh
+                    except Exception as error:
+                        # The standard downloader handles CDN redirects and
+                        # verification; keep it as the compatibility fallback.
+                        from telethon.client.downloads import _CdnRedirect
+                        if not isinstance(error, _CdnRedirect):
+                            raise
+                        file_path = await self._client.download_media(message, file=destination, progress_callback=progress_callback)
+                        break
+            else:
+                file_path = await self._client.download_media(message, file=destination, progress_callback=progress_callback)
+            if tracker and task_id and isinstance(getattr(tracker, "db", None), Database):
+                elapsed = time.monotonic() - started
+                tracker.db.log_operation("transfer_metrics", task_id=task_id, after_data={"stage": "download", "bytes": total_size, "seconds": round(elapsed, 3), "workers": self.download_workers})
         except FloodWaitError:
             raise
         except Exception as error:
@@ -463,8 +490,17 @@ class TelegramClientWrapper:
                 self._cleanup_uploaded_source(filename)
             raise
 
+    async def upload_source(self, source, progress_callback=None):
+        started = time.monotonic()
+        if isinstance(getattr(self._progress_tracker, "db", None), Database):
+            result = await ParallelTransfer(self._client, self.download_workers, self.upload_workers).upload(source, progress_callback)
+            logger.info("Upload %s bytes in %.2fs (%s workers)", os.path.getsize(source), time.monotonic() - started, self.upload_workers)
+            return result
+        kwargs = {"progress_callback": progress_callback} if progress_callback else {}
+        return await self._client.upload_file(source, **kwargs)
+
     async def _upload_video_cover(self, entity, cover: str):
-        uploaded = await self._client.upload_file(cover)
+        uploaded = await self.upload_source(cover)
         result = await self._client(functions.messages.UploadMediaRequest(
             entity, types.InputMediaUploadedPhoto(file=uploaded),
         ))
@@ -490,6 +526,9 @@ class TelegramClientWrapper:
         last_update = [0]
         tracker = self._progress_tracker
         filename = os.path.basename(file_path)
+        if (Path(file_path).parent / OWNER_FILE).exists():
+            # The handler deletes sources only after persisting the reusable media.
+            cleanup_after_upload = False
 
         def upload_progress(current: int, total: int):
             now = time.time()
@@ -508,21 +547,22 @@ class TelegramClientWrapper:
                 mime_type = "application/octet-stream"
             is_photo = mime_type.startswith("image/") and not file_path.lower().endswith(".gif")
 
-            uploaded_file = await self._client.upload_file(
-                file_path,
-                progress_callback=upload_progress
-            )
+            uploaded_file = await self.upload_source(file_path, progress_callback=upload_progress)
             if cleanup_after_upload:
                 self._cleanup_uploaded_source(file_path)
 
             uploaded_thumb = None
             if thumb and os.path.exists(thumb):
-                uploaded_thumb = await self._client.upload_file(thumb)
+                uploaded_thumb = await self.upload_source(thumb)
                 if cleanup_after_upload:
                     self._cleanup_uploaded_source(thumb)
 
             if is_photo and not attributes:
-                return InputMediaUploadedPhoto(file=uploaded_file)
+                media = InputMediaUploadedPhoto(file=uploaded_file)
+                if (Path(file_path).parent / OWNER_FILE).exists():
+                    result = await self._client(functions.messages.UploadMediaRequest(entity, media))
+                    return utils.get_input_media(result.photo)
+                return media
 
             file_attrs = list(attributes) if attributes else []
             has_filename = any(isinstance(a, DocumentAttributeFilename) for a in file_attrs)
@@ -535,7 +575,7 @@ class TelegramClientWrapper:
                 if cleanup_after_upload:
                     self._cleanup_uploaded_source(cover)
 
-            return InputMediaUploadedDocument(
+            media = InputMediaUploadedDocument(
                 file=uploaded_file,
                 mime_type=mime_type,
                 attributes=file_attrs,
@@ -543,6 +583,13 @@ class TelegramClientWrapper:
                 video_cover=uploaded_cover,
                 force_file=False
             )
+            if (Path(file_path).parent / OWNER_FILE).exists():
+                result = await self._client(functions.messages.UploadMediaRequest(entity, media))
+                converted = utils.get_input_media(result.document)
+                converted.video_cover = media.video_cover
+                converted.video_timestamp = media.video_timestamp
+                return converted
+            return media
         except FloodWaitError:
             raise
         except Exception as error:

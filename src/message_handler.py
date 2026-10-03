@@ -4,6 +4,9 @@ import logging
 import os
 import re
 import shutil
+import time
+from functools import wraps
+from pathlib import Path
 from typing import Optional, List
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from telethon.errors import FloodWaitError
@@ -12,7 +15,9 @@ from .telegram_client import TelegramClientWrapper
 from .models import ForwardResult
 from .dedup_tracker import DedupTracker
 from .errors import is_permanent_error
-from .workspace import WorkspaceStore
+from .workspace import WorkspaceStore, atomic_json
+from .transfer import load_manifest
+from .reliable_sender import encode_media, decode_media
 from .database import Database
 from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError
 
@@ -20,6 +25,17 @@ COPY_FALLBACK_ERRORS = (ChatForwardsRestrictedError, FileReferenceExpiredError, 
 
 
 logger = logging.getLogger(__name__)
+
+
+def disk_guard(method):
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        semaphore = getattr(self.client, "disk_semaphore", None)
+        if semaphore is None:
+            return await method(self, *args, **kwargs)
+        async with semaphore:
+            return await method(self, *args, **kwargs)
+    return wrapped
 
 
 class MessageHandler:
@@ -37,6 +53,30 @@ class MessageHandler:
         self._managed = False
         os.makedirs(temp_dir, exist_ok=True)
 
+    def _cached_upload(self, message, target):
+        if not self._managed:
+            return None
+        path = Path(self.temp_dir) / f"{message.id}.uploaded.json"
+        data = load_manifest(path)
+        media = getattr(message.media, "document", None) or getattr(message.media, "photo", None)
+        if data.get("source_id") != getattr(media, "id", None) or data.get("target") != target or time.time() - data.get("created_at", 0) > 3600:
+            path.unlink(missing_ok=True)
+            return None
+        try:
+            return decode_media(data["media"])
+        except (ValueError, KeyError, TypeError):
+            path.unlink(missing_ok=True)
+            return None
+
+    def _save_uploaded(self, message, target, uploaded):
+        if not self._managed:
+            return
+        media = getattr(message.media, "document", None) or getattr(message.media, "photo", None)
+        atomic_json(Path(self.temp_dir) / f"{message.id}.uploaded.json", {
+            "source_id": getattr(media, "id", None), "target": target,
+            "created_at": time.time(), "media": encode_media(uploaded),
+        })
+
     async def _wait_for_disk_space(self, message: Message = None, task_id: str = None) -> None:
         """Wait until local temp storage can hold one more media file."""
         if self.min_free_disk_mb <= 0:
@@ -46,6 +86,10 @@ class MessageHandler:
         document = getattr(getattr(message, "media", None), "document", None)
         if document:
             required_bytes = int(getattr(document, "size", 0) or 0)
+        if self._managed and message is not None:
+            existing = sum(p.stat().st_size for p in Path(self.temp_dir).glob(f"{message.id}_*")
+                           if p.is_file() and not p.name.endswith((".json", ".tmp")))
+            required_bytes = max(0, required_bytes - existing)
 
         minimum_free = self.min_free_disk_mb * 1024 * 1024
         while True:
@@ -89,22 +133,18 @@ class MessageHandler:
             return prefix
         return f"{prefix} {text}"
 
+    @staticmethod
+    def _hashtag_pattern(hashtag):
+        tag = hashtag if hashtag.startswith("#") else "#" + hashtag
+        return re.compile(r"(?<![\w#])" + re.escape(tag) + r"(?!\w)", re.IGNORECASE)
+
     def _remove_hashtags_from_text(self, text: str, hashtags: List[str]) -> str:
-        """Remove specified hashtags from text."""
         if not text or not hashtags:
             return text
-
         result = text
         for hashtag in hashtags:
-            # Normalize hashtag
-            tag = hashtag if hashtag.startswith('#') else f"#{hashtag}"
-            # Remove hashtag (case insensitive) and any trailing whitespace
-            pattern = re.compile(re.escape(tag) + r'\s*', re.IGNORECASE)
-            result = pattern.sub('', result)
-
-        # Clean up multiple spaces and trim
-        result = re.sub(r'\s+', ' ', result).strip()
-        return result
+            result = self._hashtag_pattern(hashtag).sub("", result)
+        return re.sub(r"[ \t]+", " ", result).strip()
 
     def _contains_filter_keywords(self, messages: List[Message], keywords: List[str]) -> bool:
         """Check if any message caption contains filter keywords."""
@@ -137,7 +177,7 @@ class MessageHandler:
             caption_lower = caption.lower()
             for hashtag in required_hashtags:
                 tag = hashtag.lower() if hashtag.startswith('#') else f"#{hashtag.lower()}"
-                if tag in caption_lower:
+                if self._hashtag_pattern(hashtag).search(caption_lower):
                     logger.debug(f"Message {msg.id} contains required hashtag: {hashtag}")
                     return True
         return False
@@ -332,6 +372,7 @@ class MessageHandler:
             logger.warning(f"Album copy failed: {e}, trying individual download")
             return await self._download_and_send_album(messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
 
+    @disk_guard
     async def _download_and_send_album(self, messages: List[Message], target_channel: int,
                                        caption_prefix: str = "", task_id: str = None,
                                        target_topic_id: int = None,
@@ -368,6 +409,10 @@ class MessageHandler:
             # Keep only the current source file on disk. Telegram retains the
             # uploaded handle, which lets the final request remain one album.
             for index, msg in enumerate(media_messages, start=1):
+                cached = self._cached_upload(msg, target_channel)
+                if cached is not None:
+                    uploaded_media.append(cached)
+                    continue
                 await self._wait_for_disk_space(msg, task_id)
                 artwork = await self.client.prepare_media_artwork(msg, self.temp_dir, task_id)
                 all_artwork_paths.extend(artwork.paths)
@@ -399,6 +444,11 @@ class MessageHandler:
                     message_id=msg.id
                 )
                 uploaded_media.append(media)
+                self._save_uploaded(msg, target_channel, media)
+                if self._managed:
+                    self._cleanup_file(path)
+                    for artwork_path in artwork.paths:
+                        self._cleanup_file(artwork_path)
 
             if not uploaded_media:
                 return ForwardResult(success=False, method="download", error="No files downloaded")
@@ -424,6 +474,9 @@ class MessageHandler:
         except Exception as e:
             if is_permanent_error(e):
                 raise
+            if self._managed and isinstance(e, (FileReferenceExpiredError, FilerefUpgradeNeededError)):
+                for message in messages:
+                    (Path(self.temp_dir) / f"{message.id}.uploaded.json").unlink(missing_ok=True)
             logger.error(f"Download album failed: {e}")
             return ForwardResult(success=False, method="download", error=str(e))
         finally:
@@ -495,6 +548,7 @@ class MessageHandler:
             logger.warning(f"Copy message {message.id} failed: {e}")
             return False
 
+    @disk_guard
     async def download_and_send(self, message: Message, target_channel: int,
                                caption_prefix: str = "", task_id: str = None,
                                target_topic_id: int = None,
@@ -510,6 +564,10 @@ class MessageHandler:
             if caption and hashtags_to_remove:
                 caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
+            cached = self._cached_upload(message, target_channel)
+            if cached is not None:
+                return await self.client.send_existing_media(target_channel, cached,
+                    task_id=task_id, message_ids=[message.id], caption=caption, reply_to=target_topic_id, send_as=send_as)
             await self._wait_for_disk_space(message, task_id)
             artwork = await self.client.prepare_media_artwork(message, self.temp_dir, task_id)
             message = artwork.message
@@ -520,18 +578,20 @@ class MessageHandler:
             if file_path:
                 document = getattr(message.media, 'document', None)
                 attributes = document.attributes if document else None
-                success = await self.client.send_file_with_metadata(
-                    target_channel,
-                    file_path,
-                    caption=caption if caption else None,
-                    attributes=attributes,
-                    thumb=artwork.thumb,
-                    cover=artwork.cover,
-                    task_id=task_id,
-                    reply_to=target_topic_id,
-                    send_as=send_as,
-                    message_id=message.id
-                )
+                if self._managed:
+                    entity = await self.client.get_entity(target_channel)
+                    media = await self.client.upload_media_for_album(file_path, attributes=attributes,
+                        thumb=artwork.thumb, cover=artwork.cover, task_id=task_id, message_id=message.id,
+                        cleanup_after_upload=False, entity=entity)
+                    self._save_uploaded(message, target_channel, media)
+                    self._cleanup_file(file_path)
+                    success = await self.client.send_existing_media(entity, media, task_id=task_id,
+                        message_ids=[message.id], caption=caption, reply_to=target_topic_id, send_as=send_as)
+                else:
+                    success = await self.client.send_file_with_metadata(
+                        target_channel, file_path, caption=caption if caption else None,
+                        attributes=attributes, thumb=artwork.thumb, cover=artwork.cover,
+                        task_id=task_id, reply_to=target_topic_id, send_as=send_as, message_id=message.id)
                 if success and task_id and self.progress_tracker:
                     self.progress_tracker.clear_transfer(task_id)
                 return success
@@ -541,6 +601,8 @@ class MessageHandler:
         except Exception as e:
             if is_permanent_error(e):
                 raise
+            if self._managed and isinstance(e, (FileReferenceExpiredError, FilerefUpgradeNeededError)):
+                (Path(self.temp_dir) / f"{message.id}.uploaded.json").unlink(missing_ok=True)
             logger.error(f"Download and send failed: {e}")
             return False
         finally:
