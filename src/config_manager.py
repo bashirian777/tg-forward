@@ -1,5 +1,6 @@
-"""Configuration access backed by the SQLite repository."""
+"""Configuration access with record-level optimistic concurrency."""
 import os
+from copy import deepcopy
 from typing import Optional
 
 from .database import Database
@@ -7,86 +8,91 @@ from .models import AppConfig, ForwardTask
 
 
 class ConfigManager:
-    """Loads and updates application configuration transactionally."""
-
-    def __init__(self, config_path: str = "config/config.json", db_path: str = None):
+    def __init__(self, config_path="config/config.json", db_path=None):
         self.config_path = config_path
         self.db = Database(db_path or os.path.join(os.path.dirname(config_path), "forwarder.db"))
         self._config: Optional[AppConfig] = None
         self._raw_app = {}
         self._raw_tasks = {}
+        self._app_revision = 0
+        self._task_revisions = {}
 
     def load_config(self) -> AppConfig:
-        """Migrate legacy JSON once, then load the database snapshot."""
         self.db.ensure_legacy_migration(self.config_path)
-        app_data = self.db.get_app_config()
-        if app_data is None:
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
-
-        raw_tasks = self.db.list_tasks()
-        self._raw_app = dict(app_data)
-        self._raw_tasks = {str(task["task_id"]): dict(task) for task in raw_tasks}
-        data = dict(app_data)
-        data["tasks"] = raw_tasks
-        self._config = AppConfig.from_dict(data)
+        # Read values and revisions from the same snapshot.
+        with self.db.connection() as db:
+            row = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
+            if not row:
+                raise FileNotFoundError(f"Config not found: {self.config_path}")
+            import json
+            app = json.loads(row["data"])
+            self._app_revision = row["revision"]
+            tasks = db.execute("SELECT data,revision,task_id FROM tasks ORDER BY task_id").fetchall()
+            self._raw_tasks = {row["task_id"]: json.loads(row["data"]) for row in tasks}
+            self._task_revisions = {row["task_id"]: row["revision"] for row in tasks}
+        self._raw_app = deepcopy(app)
+        self._config = AppConfig.from_dict(dict(app, tasks=list(deepcopy(self._raw_tasks).values())))
         return self._config
 
-    def save_config(self, config: AppConfig) -> None:
-        """Save configuration and tasks in one database transaction."""
-        app_data = dict(self._raw_app)
-        app_data.update(config.to_dict())
-        app_data.pop("tasks", None)
+    def save_app_config(self, config, expected_revision=None):
+        values = dict(self._raw_app)
+        values.update(config.to_dict())
+        values.pop("tasks", None)
+        self.db.update_app_config(values, self._app_revision if expected_revision is None else expected_revision)
+        self.load_config()
 
-        task_data = []
-        for task in config.tasks:
-            current = dict(self._raw_tasks.get(task.task_id, {}))
-            current.update(task.to_dict())
-            task_data.append(current)
+    def save_config(self, config):
+        """Bootstrap or save changed records; removals require explicit delete."""
+        if not self.db.get_app_config():
+            values = config.to_dict()
+            tasks = values.pop("tasks")
+            self.db.save_config(values, tasks)
+            self.load_config()
+            return
+        # Keep detached copies because load_config refreshes the local snapshot.
+        app = config.to_dict()
+        tasks = app.pop("tasks")
+        old_app = AppConfig.from_dict(dict(self._raw_app, tasks=[])).to_dict() if self._raw_app else {}
+        old_app.pop("tasks", None)
+        revisions = dict(self._task_revisions)
+        old_tasks = deepcopy(self._raw_tasks)
+        if app != old_app:
+            self.save_app_config(config)
+        for task in tasks:
+            old = old_tasks.get(task["task_id"])
+            if old is None or ForwardTask.from_dict(dict(old)).to_dict() != task:
+                values = dict(old or {})
+                values.update(task)
+                self.db.save_task(values, revisions.get(task["task_id"], 0))
+        self.load_config()
 
-        self.db.save_config(app_data, task_data)
-        self._raw_app = app_data
-        self._raw_tasks = {str(task["task_id"]): dict(task) for task in task_data}
-        self._config = config
-
-    def get_config(self) -> Optional[AppConfig]:
+    def get_config(self):
         return self._config
 
-    def reload(self) -> AppConfig:
+    def reload(self):
         return self.load_config()
 
-    def add_task(self, task: ForwardTask) -> None:
-        if self._config is None:
-            raise ValueError("Config not loaded. Call load_config() first.")
-        if self.get_task(task.task_id):
-            raise ValueError(f"Task with id '{task.task_id}' already exists")
-        self._config.tasks.append(task)
-        self.save_config(self._config)
+    def add_task(self, task):
+        self.db.save_task(task.to_dict(), expected_revision=0)
+        self.load_config()
 
-    def remove_task(self, task_id: str) -> None:
-        if self._config is None:
-            raise ValueError("Config not loaded. Call load_config() first.")
-        original_count = len(self._config.tasks)
-        self._config.tasks = [task for task in self._config.tasks if task.task_id != task_id]
-        if len(self._config.tasks) == original_count:
-            raise ValueError(f"Task with id '{task_id}' not found")
-        self.save_config(self._config)
+    def remove_task(self, task_id):
+        self.db.delete_task(task_id, self._task_revisions.get(task_id, 0))
+        self.load_config()
 
-    def update_task(self, task: ForwardTask) -> None:
-        if self._config is None:
-            raise ValueError("Config not loaded. Call load_config() first.")
-        for index, existing in enumerate(self._config.tasks):
-            if existing.task_id == task.task_id:
-                self._config.tasks[index] = task
-                self.save_config(self._config)
-                return
-        raise ValueError(f"Task with id '{task.task_id}' not found")
+    def update_task(self, task, expected_revision=None):
+        old = self._raw_tasks.get(task.task_id)
+        if old is None:
+            raise ValueError(f"Task {task.task_id} not found")
+        values = dict(old)
+        values.update(task.to_dict())
+        self.db.save_task(values, self._task_revisions[task.task_id] if expected_revision is None else expected_revision)
+        self.load_config()
 
-    def get_task(self, task_id: str) -> Optional[ForwardTask]:
-        if self._config is None:
-            return None
-        return next((task for task in self._config.tasks if task.task_id == task_id), None)
+    def get_task(self, task_id):
+        return next((task for task in self._config.tasks if task.task_id == task_id), None) if self._config else None
 
-    def create_default_config(self, api_id: int, api_hash: str, phone: str) -> AppConfig:
-        config = AppConfig(api_id=api_id, api_hash=api_hash, phone=phone, tasks=[])
+    def create_default_config(self, api_id, api_hash, phone):
+        config = AppConfig(api_id=api_id, api_hash=api_hash, phone=phone)
         self.save_config(config)
-        return config
+        return self._config

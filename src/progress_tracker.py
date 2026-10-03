@@ -60,6 +60,18 @@ class ProgressTracker:
         progress.update(message_id, count)
         self.db.save_progress(progress.to_dict())
 
+    def complete_group(self, task_id, message_ids, outcome, count=0, ordered_ids=None):
+        data = self.db.complete_group(task_id, message_ids, outcome, count, ordered_ids or message_ids)
+        self._progress[task_id] = TaskProgress(**{key: data[key] for key in ("task_id", "last_message_id", "last_forward_time", "forwarded_count")})
+
+    def completed_ids(self, task_id):
+        return self.db.completed_ids(task_id)
+
+    def reset_task_state(self, task_id, clear_dedup=False):
+        self.db.reset_task_state(task_id, clear_dedup)
+        self._progress.pop(task_id, None)
+        self._download_progress.pop(task_id, None)
+
     def set_progress(self, task_id: str, last_message_id: int,
                      forwarded_count: Optional[int] = None) -> TaskProgress:
         progress = self.get_task_progress(task_id)

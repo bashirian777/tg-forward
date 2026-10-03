@@ -1,304 +1,192 @@
-"""Forwarder engine for Telegram Forwarder."""
-import logging
+"""Ordered forwarding with durable receipts and album-aware fetching."""
 import asyncio
-from typing import Optional, List, Dict
-from telethon.tl.types import Message
+import logging
+from typing import List
 from telethon.errors import FloodWaitError
 
-from .telegram_client import TelegramClientWrapper
-from .message_handler import MessageHandler
-from .progress_tracker import ProgressTracker
 from .models import ForwardTask
 from .utils import get_random_delay
-
 
 logger = logging.getLogger(__name__)
 
 
 class Forwarder:
-    """Core forwarding engine that coordinates message forwarding."""
-
-    def __init__(self, client: TelegramClientWrapper,
-                 message_handler: MessageHandler,
-                 progress_tracker: ProgressTracker,
-                 group_semaphore: asyncio.Semaphore = None):
+    def __init__(self, client, message_handler, progress_tracker, group_semaphore=None):
         self.client = client
         self.message_handler = message_handler
         self.progress_tracker = progress_tracker
-        self._group_semaphore = group_semaphore or asyncio.Semaphore(1)
+        self._group_semaphore = group_semaphore if group_semaphore is not None else asyncio.Semaphore(1)
         self._running = False
         self._paused = False
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
+        self._ordered_ids = None
+        self.error = ""
+        self.album_settle_seconds = 2.0
 
-    def _message_topic_id(self, message: Message) -> Optional[int]:
-        reply_to = getattr(message, "reply_to", None)
-        topic_id = getattr(reply_to, "reply_to_top_id", None)
-        if topic_id is None:
-            topic_id = getattr(reply_to, "reply_to_msg_id", None)
-        if topic_id is None:
-            topic_id = getattr(message, "reply_to_top_id", None)
-        return int(topic_id) if topic_id is not None else None
+    @staticmethod
+    def _message_topic_id(message):
+        reply = getattr(message, "reply_to", None)
+        value = getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None) or getattr(message, "reply_to_top_id", None)
+        return int(value) if value is not None else None
 
-    def _matches_source_topic(self, message: Message, source_topic_id: int) -> bool:
-        return int(getattr(message, "id", -1)) == int(source_topic_id) or self._message_topic_id(message) == int(source_topic_id)
-
-    def _filter_source_topic(self, messages: List[Message], source_topic_id: Optional[int]) -> List[Message]:
+    def _filter_source_topic(self, messages, source_topic_id):
         if source_topic_id is None:
             return messages
-        return [message for message in messages if self._matches_source_topic(message, source_topic_id)]
+        return [m for m in messages if m.id == source_topic_id or self._message_topic_id(m) == source_topic_id]
 
-    def _group_messages(self, messages: List[Message]) -> List[List[Message]]:
-        """
-        Group messages by grouped_id (media albums) while preserving
-        chronological order.
-
-        Messages without grouped_id are treated as single-item groups. The
-        resulting groups are ordered by the smallest message id inside each
-        group, which keeps singles and albums in the same order they were
-        fetched in.
-        """
-        ordered = sorted(messages, key=lambda m: m.id)
-        result: List[List[Message]] = []
-        groups: Dict[int, List[Message]] = {}
-        
-        for msg in ordered:
-            grouped_id = getattr(msg, 'grouped_id', None)
+    def _group_messages(self, messages):
+        result, albums = [], {}
+        for message in sorted(messages, key=lambda m: m.id):
+            grouped_id = getattr(message, "grouped_id", None)
             if grouped_id:
-                if grouped_id not in groups:
-                    groups[grouped_id] = [msg]
-                    result.append(groups[grouped_id])
-                else:
-                    groups[grouped_id].append(msg)
+                if grouped_id not in albums:
+                    albums[grouped_id] = []
+                    result.append(albums[grouped_id])
+                albums[grouped_id].append(message)
             else:
-                result.append([msg])
-        
+                result.append([message])
         return result
 
-    async def run_task(self, task: ForwardTask) -> None:
-        """
-        Run a forwarding task.
-        
-        Fetches messages from source channel and forwards them to target,
-        respecting the configured delay range.
-        """
-        self._running = True
-        self._paused = False
-        
-        logger.info(f"Starting task {task.task_id}: {task.source_channel} -> {task.target_channel}")
-        
-        # Get last progress
-        last_message_id = self.progress_tracker.get_last_message_id(task.task_id)
-        logger.info(f"Resuming from message ID: {last_message_id}")
-        
+    async def _fetch_batch(self, task, checkpoint):
+        messages = list(await self.client.get_messages(task.source_channel, min_id=checkpoint, limit=50))
+        if not messages:
+            return []
+        messages.sort(key=lambda m: m.id)
+        tail = getattr(messages[-1], "grouped_id", None)
+        if not tail:
+            return messages
+        # A batch may finish in the middle of an album. Scan until we observe
+        # a later group, or the live edge stays unchanged for a settling window.
+        empty_checks = 0
         while self._running:
-            if self._paused:
-                await asyncio.sleep(1)
-                continue
-            
-            try:
-                # Fetch messages after last forwarded
-                logger.debug(f"Fetching messages from {task.source_channel}, min_id={last_message_id}")
-                messages = await self.client.get_messages(
-                    task.source_channel,
-                    min_id=last_message_id,
-                    limit=50
-                )
-                logger.info(f"Fetched {len(messages) if messages else 0} messages")
-                
-                if not messages:
-                    logger.info(f"No new messages for task {task.task_id}, waiting 30s...")
-                    await asyncio.sleep(30)  # Wait before checking again
-                    continue
-                
-                # Group messages by media album (preserving order)
-                message_groups = self._group_messages(messages)
-                logger.info(f"Grouped into {len(message_groups)} groups")
-                batch_failed = False
-                
-                for original_group in message_groups:
-                    if not self._running:
-                        break
+            extra = list(await self.client.get_messages(task.source_channel, min_id=messages[-1].id, limit=50))
+            extra.sort(key=lambda m: m.id)
+            members = [m for m in extra if getattr(m, "grouped_id", None) == tail]
+            if members:
+                last_member = max(m.id for m in members)
+                messages.extend(m for m in extra if m.id <= last_member)
+                empty_checks = 0
+            if any(getattr(m, "grouped_id", None) != tail and (not members or m.id > last_member) for m in extra):
+                break
+            if not extra:
+                empty_checks += 1
+                if empty_checks >= 2:
+                    break
+                await asyncio.sleep(self.album_settle_seconds)
+        return messages
 
-                    group = self._filter_source_topic(original_group, task.source_topic_id)
-                    original_max_id = max(m.id for m in original_group)
-                    if not group:
-                        self.progress_tracker.advance_progress(task.task_id, original_max_id)
-                        last_message_id = max(last_message_id, original_max_id)
-                        continue
+    async def _wait_ready(self):
+        await self._resume_event.wait()
+        return self._running
 
-                    while self._paused:
-                        await asyncio.sleep(1)
-                    
-                    # Process one group at a time across all tasks so a small
-                    # machine never downloads multiple large media groups.
-                    self.progress_tracker.begin_transfer(
-                        task.task_id,
-                        [m.id for m in group if getattr(m, "id", None) is not None],
-                        len([m for m in group if self.message_handler.is_media_message(m)])
-                    )
-                    async with self._group_semaphore:
-                        result = await self.process_message_group(group, task)
-                    
-                    # On failure, stop this batch and retry from the same
-                    # position. Do NOT advance last_message_id, otherwise the
-                    # failed message would be skipped forever.
-                    if result == "failed":
-                        self.progress_tracker.mark_transfer_state(task.task_id, "interrupted")
-                        logger.warning(
-                            f"[{task.task_id}] Failed to forward group "
-                            f"{[m.id for m in group]}, will retry from "
-                            f"message {last_message_id}"
-                        )
-                        batch_failed = True
-                        break
-                    
-                    if result != "failed":
-                        # The durable checkpoint is advanced below only after
-                        # the whole group has completed or was explicitly skipped.
-                        self.progress_tracker.clear_transfer(task.task_id)
-
-                    # Advance to the highest message ID in the group. Groups
-                    # are now processed in chronological order, but keep the
-                    # max() guard to make progress never go backwards.
-                    max_id = max(m.id for m in group)
-                    last_message_id = max(last_message_id, max_id)
-                    
-                    # Only delay if we actually forwarded media
-                    if result == "forwarded":
-                        delay = get_random_delay(task.min_delay, task.max_delay)
-                        logger.debug(f"Waiting {delay:.1f}s before next message")
-                        await asyncio.sleep(delay)
-                    # No delay for skipped messages
-                
-                if batch_failed:
-                    logger.info(f"Retrying failed message for task {task.task_id} in 10s")
-                    await asyncio.sleep(10)
-                    
-            except FloodWaitError as e:
-                wait = getattr(e, 'seconds', 10) + 1
-                logger.warning(
-                    f"Task {task.task_id} hit FloodWait "
-                    f"{getattr(e, 'seconds', '?')}s, waiting {wait}s"
-                )
-                await asyncio.sleep(wait)
-            except Exception as e:
-                logger.error(f"Error in task {task.task_id}: {e}")
-                await asyncio.sleep(10)  # Wait before retry
-        
-        logger.info(f"Task {task.task_id} stopped")
-
-    async def process_message_group(self, messages: List[Message], task: ForwardTask) -> str:
-        """
-        Process and forward a message group (single message or album).
-        
-        Returns:
-            "forwarded" if media was forwarded
-            "skipped" if no media to forward
-            "filtered" if filtered by keywords
-            "no_hashtag" if missing required hashtags
-            "duplicate" if the media was already sent before
-            "failed" if forwarding failed (progress is NOT advanced)
-        """
+    async def run_task(self, task: ForwardTask):
+        self._running = True
+        self.error = ""
+        failures = 0
         try:
-            # Forward the group with task_id for progress tracking
+            while self._running:
+                if not await self._wait_ready():
+                    break
+                checkpoint = self.progress_tracker.get_last_message_id(task.task_id)
+                try:
+                    messages = await self._fetch_batch(task, checkpoint)
+                    if not messages:
+                        await asyncio.sleep(30)
+                        continue
+                    self._ordered_ids = [m.id for m in messages]
+                    failed = False
+                    for original_group in self._group_messages(messages):
+                        if not await self._wait_ready():
+                            break
+                        done = self.progress_tracker.completed_ids(task.task_id)
+                        if all(m.id in done or m.id <= self.progress_tracker.get_last_message_id(task.task_id) for m in original_group):
+                            self.progress_tracker.complete_group(task.task_id, [m.id for m in original_group], "receipt", ordered_ids=self._ordered_ids)
+                            continue
+                        group = self._filter_source_topic(original_group, task.source_topic_id)
+                        if not group:
+                            self.progress_tracker.complete_group(task.task_id, [m.id for m in original_group], "topic", ordered_ids=self._ordered_ids)
+                            continue
+                        async with self._group_semaphore:
+                            # Never start a new send after pausing while queued.
+                            if self._paused:
+                                continue
+                            if not self._running:
+                                break
+                            self.progress_tracker.begin_transfer(task.task_id, [m.id for m in group], sum(self.message_handler.is_media_message(m) for m in group))
+                            result = await self.process_message_group(group, task, original_group)
+                        if result == "failed":
+                            self.progress_tracker.mark_transfer_state(task.task_id, "interrupted")
+                            failed = True
+                            break
+                        self.progress_tracker.clear_transfer(task.task_id)
+                        failures = 0
+                        if result == "forwarded":
+                            await asyncio.sleep(get_random_delay(task.min_delay, task.max_delay))
+                    if failed:
+                        failures += 1
+                        await asyncio.sleep(min(60, 2 ** min(failures, 5)))
+                except FloodWaitError as error:
+                    await asyncio.sleep(error.seconds + 1)
+                except Exception as error:
+                    from .errors import is_permanent_error
+                    if is_permanent_error(error):
+                        self.error = str(error)
+                        self.progress_tracker.record_error(task.task_id, "transfer", error)
+                        break
+                    logger.exception("Task %s failed", task.task_id)
+                    await asyncio.sleep(10)
+        finally:
+            self._running = False
+
+    async def process_message_group(self, messages, task, original_group=None):
+        try:
             result = await self.message_handler.forward_message_group(
                 messages, task.source_channel, task.target_channel,
-                caption_prefix=task.caption_prefix,
-                task_id=task.task_id,
-                filter_keywords=task.filter_keywords,
-                required_hashtags=task.required_hashtags,
-                source_topic_id=task.source_topic_id,
-                target_topic_id=task.target_topic_id,
-                remove_hashtags=task.remove_hashtags,
-                send_as_channel=task.send_as_channel,
-                deduplicate=task.deduplicate
+                caption_prefix=task.caption_prefix, task_id=task.task_id,
+                filter_keywords=task.filter_keywords, required_hashtags=task.required_hashtags,
+                source_topic_id=task.source_topic_id, target_topic_id=task.target_topic_id,
+                remove_hashtags=task.remove_hashtags, send_as_channel=task.send_as_channel,
+                deduplicate=task.deduplicate,
             )
-            
-            max_id = max(m.id for m in messages)
-            
-            if result.method == "skip":
-                # No media, only advance the resume position
-                self.progress_tracker.advance_progress(task.task_id, max_id)
-                logger.debug(f"[{task.task_id}] Skipped non-media message(s)")
-                return "skipped"
-            
-            if result.method == "filtered":
-                # Filtered by keywords, only advance the resume position
-                self.progress_tracker.advance_progress(task.task_id, max_id)
-                logger.debug(f"[{task.task_id}] Filtered message(s) by keywords")
-                return "filtered"
-            
-            if result.method == "no_hashtag":
-                # Missing required hashtags, only advance the resume position
-                self.progress_tracker.advance_progress(task.task_id, max_id)
-                logger.debug(f"[{task.task_id}] Skipped message(s) - missing required hashtags")
-                return "no_hashtag"
-            
-            if result.method == "duplicate":
-                # Duplicate media, only advance the resume position
-                self.progress_tracker.advance_progress(task.task_id, max_id)
-                msg_ids = [m.id for m in messages]
-                logger.info(f"[{task.task_id}] Skipped duplicate media, message IDs: {msg_ids}")
-                return "duplicate"
-            
-            if result.success:
-                count = result.forwarded_count or len(messages)
-                self.progress_tracker.record_forwarded(task.task_id, max_id, count)
-                self.progress_tracker.resolve_task_errors(task.task_id)
-                progress = self.progress_tracker.get_task_progress(task.task_id)
-                msg_ids = [m.id for m in messages]
-                logger.info(
-                    f"[{task.task_id}] Forwarded {len(messages)} message(s) {msg_ids} "
-                    f"via {result.method} (total: {progress.forwarded_count})"
-                )
-                return "forwarded"
-            else:
-                logger.warning(
-                    f"[{task.task_id}] Failed to forward messages: {result.error}. "
-                    f"Will retry from the same message ID."
-                )
+            if not result.success:
                 return "failed"
-        except FloodWaitError as e:
-            wait = getattr(e, 'seconds', 10) + 1
-            logger.warning(
-                f"[{task.task_id}] FloodWait {getattr(e, 'seconds', '?')}s, "
-                f"waiting {wait}s before retry"
-            )
-            await asyncio.sleep(wait)
-            return "failed"
-        except Exception as e:
-            max_id = max(m.id for m in messages)
-            logger.error(
-                f"[{task.task_id}] Error processing messages {max_id}: {e}. "
-                f"Will retry."
-            )
+            outcome = result.method if result.method in {"skip", "filtered", "no_hashtag", "duplicate"} else "forwarded"
+            ids = [m.id for m in (original_group or messages)]
+            self.progress_tracker.complete_group(task.task_id, ids, outcome, result.forwarded_count if outcome == "forwarded" else 0, self._ordered_ids)
+            if outcome == "forwarded":
+                self.progress_tracker.resolve_task_errors(task.task_id)
+                logger.info("[%s] Forwarded %s via %s", task.task_id, ids, result.method)
+            return outcome
+        except FloodWaitError:
+            raise
+        except Exception as error:
+            from .errors import is_permanent_error
+            if is_permanent_error(error):
+                raise
+            self.progress_tracker.record_error(task.task_id, "transfer", error, message_id=messages[0].id)
             return "failed"
 
-    def stop(self) -> None:
-        """Stop the forwarder."""
+    def stop(self):
         self._running = False
+        self._resume_event.set()
 
-    def pause(self) -> None:
-        """Pause the forwarder."""
+    def pause(self):
         self._paused = True
+        self._resume_event.clear()
 
-    def resume(self) -> None:
-        """Resume the forwarder."""
+    def resume(self):
         self._paused = False
+        self._resume_event.set()
 
     @property
-    def is_running(self) -> bool:
+    def is_running(self):
         return self._running
 
     @property
-    def is_paused(self) -> bool:
+    def is_paused(self):
         return self._paused
 
 
-def calculate_resume_position(last_message_id: int) -> int:
-    """
-    Calculate the min_id for resuming from a given last message ID.
-    
-    The min_id parameter in Telegram API is exclusive, so we use
-    the last_message_id directly to get messages after it.
-    """
+def calculate_resume_position(last_message_id):
     return last_message_id

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 
+class ConfigurationConflict(ValueError):
+    """The record changed after it was read by a management client."""
+
+
 class Database:
     """Small transactional SQLite repository used by all application layers."""
 
@@ -109,10 +113,28 @@ class Database:
                     resolved INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS processed_messages (
+                    task_id TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    PRIMARY KEY(task_id, message_id),
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS send_intents (
+                    task_id TEXT NOT NULL,
+                    intent_key TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    PRIMARY KEY(task_id, intent_key),
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
                 CREATE INDEX IF NOT EXISTS idx_task_errors_task_created
                     ON task_errors(task_id, created_at DESC);
                 """
             )
+            for table in ("app_settings", "tasks"):
+                columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if "revision" not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
             db.execute(
                 "INSERT OR IGNORE INTO app_settings(id, data, updated_at) "
                 "SELECT id, data, updated_at FROM app_config"
@@ -186,7 +208,8 @@ class Database:
             for task in tasks:
                 task_id = str(task["task_id"])
                 db.execute(
-                    "INSERT OR REPLACE INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?)",
+                    "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
+                    "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
                     (task_id, json.dumps(task, ensure_ascii=False), now),
                 )
 
@@ -250,10 +273,30 @@ class Database:
             row = db.execute("SELECT data FROM app_settings WHERE id = 1").fetchone()
             return json.loads(row["data"]) if row else None
 
-    def update_app_config(self, data: dict) -> None:
+    def revision(self, task_id: str = None) -> int:
         with self.connection() as db:
+            if task_id is None:
+                row = db.execute("SELECT revision FROM app_settings WHERE id=1").fetchone()
+            else:
+                row = db.execute("SELECT revision FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            return int(row[0]) if row else 0
+
+    @staticmethod
+    def _check_revision(db, table, key, expected):
+        column = "task_id" if table == "tasks" else "id"
+        row = db.execute(f"SELECT revision FROM {table} WHERE {column}=?", (key,)).fetchone()
+        actual = int(row[0]) if row else 0
+        if expected is not None and actual != expected:
+            raise ConfigurationConflict("配置已被其他操作修改，请重新读取后再保存")
+        return actual
+
+    def update_app_config(self, data: dict, expected_revision=None) -> None:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_revision(db, "app_settings", 1, expected_revision)
             db.execute(
-                "INSERT OR REPLACE INTO app_settings(id, data, updated_at) VALUES(1, ?, ?)",
+                "INSERT INTO app_settings(id, data, updated_at) VALUES(1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=app_settings.revision+1",
                 (json.dumps(data, ensure_ascii=False), self._now()),
             )
             db.execute(
@@ -270,33 +313,96 @@ class Database:
             row = db.execute("SELECT data FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
             return json.loads(row["data"]) if row else None
 
-    def save_config(self, app_data: dict, tasks: Iterable[dict]) -> None:
-        now = self._now()
-        tasks = list(tasks)
+    def save_task(self, data: dict, expected_revision=None) -> None:
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_revision(db, "tasks", data["task_id"], expected_revision)
             db.execute(
-                "INSERT OR REPLACE INTO app_settings(id, data, updated_at) VALUES(1, ?, ?)",
+                "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
+                (data["task_id"], json.dumps(data, ensure_ascii=False), self._now()),
+            )
+
+    def save_config(self, app_data: dict, tasks: Iterable[dict]) -> None:
+        """Bootstrap/import a snapshot without deleting absent tasks or child rows."""
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = self._now()
+            db.execute(
+                "INSERT INTO app_settings(id, data, updated_at) VALUES(1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=app_settings.revision+1",
                 (json.dumps(app_data, ensure_ascii=False), now),
             )
-            db.execute(
-                "INSERT INTO config_snapshots(created_at, reason, data) VALUES(?, ?, ?)",
-                (now, "save_config", json.dumps({"app": app_data, "tasks": tasks}, ensure_ascii=False)),
-            )
-            incoming = set()
             for task in tasks:
-                task_id = str(task["task_id"])
-                incoming.add(task_id)
                 db.execute(
-                    "INSERT OR REPLACE INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?)",
-                    (task_id, json.dumps(task, ensure_ascii=False), now),
+                    "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
+                    "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
+                    (task["task_id"], json.dumps(task, ensure_ascii=False), now),
                 )
-            existing = {row["task_id"] for row in db.execute("SELECT task_id FROM tasks")}
-            for task_id in existing - incoming:
-                db.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
 
-    def delete_task(self, task_id: str) -> None:
+    def delete_task(self, task_id: str, expected_revision=None) -> None:
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            actual = self._check_revision(db, "tasks", task_id, expected_revision)
+            if not actual:
+                raise ValueError(f"Task {task_id} not found")
             db.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+
+    def completed_ids(self, task_id: str) -> set:
+        with self.connection() as db:
+            return {row[0] for row in db.execute("SELECT message_id FROM processed_messages WHERE task_id=?", (task_id,))}
+
+    def complete_group(self, task_id, message_ids, outcome, count, ordered_ids) -> dict:
+        """Commit receipts, count and the safe checkpoint in one transaction."""
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            done = {row[0] for row in db.execute("SELECT message_id FROM processed_messages WHERE task_id=?", (task_id,))}
+            fresh = not set(message_ids).issubset(done)
+            db.executemany(
+                "INSERT OR IGNORE INTO processed_messages(task_id, message_id, outcome) VALUES(?, ?, ?)",
+                [(task_id, value, outcome) for value in message_ids],
+            )
+            done.update(message_ids)
+            row = db.execute("SELECT * FROM task_progress WHERE task_id=?", (task_id,)).fetchone()
+            progress = dict(row) if row else {"task_id": task_id, "last_message_id": 0, "last_forward_time": "", "forwarded_count": 0}
+            checkpoint = progress["last_message_id"]
+            for value in sorted(set(ordered_ids)):
+                if value <= checkpoint:
+                    continue
+                if value not in done:
+                    break
+                checkpoint = value
+            progress["last_message_id"] = checkpoint
+            if fresh and count:
+                progress["forwarded_count"] += count
+                progress["last_forward_time"] = self._now()
+            db.execute(
+                "INSERT INTO task_progress(task_id,last_message_id,last_forward_time,forwarded_count,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(task_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_forward_time=excluded.last_forward_time,forwarded_count=excluded.forwarded_count,updated_at=excluded.updated_at",
+                (task_id, checkpoint, progress["last_forward_time"], progress["forwarded_count"], self._now()),
+            )
+            db.execute("DELETE FROM processed_messages WHERE task_id=? AND message_id<=?", (task_id, checkpoint))
+            return progress
+
+    def reset_task_state(self, task_id, clear_dedup=False):
+        with self.connection() as db:
+            for table in ("processed_messages", "send_intents", "active_transfers", "task_progress"):
+                db.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
+            if clear_dedup:
+                db.execute("DELETE FROM dedup_records WHERE task_id=?", (task_id,))
+
+    def get_intent(self, task_id, key):
+        with self.connection() as db:
+            row = db.execute("SELECT data FROM send_intents WHERE task_id=? AND intent_key=?", (task_id, key)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_intent(self, task_id, key, data):
+        with self.connection() as db:
+            db.execute(
+                "INSERT INTO send_intents(task_id,intent_key,data) VALUES(?,?,?) "
+                "ON CONFLICT(task_id,intent_key) DO UPDATE SET data=excluded.data",
+                (task_id, key, json.dumps(data)),
+            )
 
     def get_progress(self, task_id: str) -> dict:
         with self.connection() as db:
