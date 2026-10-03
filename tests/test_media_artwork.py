@@ -250,14 +250,21 @@ async def test_handlers_cache_artwork_before_download_and_clean_every_exit(tmp_p
 
 
 def test_startup_cleanup_also_removes_stale_thumbnails_and_covers(tmp_path):
-    import os
     import time
+    from src.workspace import WorkspaceStore, OWNER_FILE, atomic_json
+    store = WorkspaceStore(tmp_path)
+    path = store.open("task", -100123, [1])
     for name in ("video.mp4", "thumb_task.jpg", "cover_task.jpg"):
-        path = tmp_path / name
-        path.write_bytes(b"old")
-        os.utime(path, (time.time() - 7200, time.time() - 7200))
-    active = tmp_path / "cover_active.jpg"
-    active.write_bytes(b"active")
+        (path / name).write_bytes(b"old")
+    store.release(path)
+    atomic_json(path / OWNER_FILE, {"task_id": "task", "updated_at": time.time() - 7200})
+    active = store.open("active", -100123, [2])
+    (active / "cover_active.jpg").write_bytes(b"active")
+    unrelated = tmp_path / "unrelated.jpg"
+    unrelated.write_bytes(b"private")
     result = cleanup_temp_dir(str(tmp_path), max_age_hours=1)
     assert result["removed"] == 3
-    assert list(tmp_path.iterdir()) == [active]
+    assert not path.exists()
+    assert (active / "cover_active.jpg").exists()
+    assert unrelated.exists()
+    store.release(active)

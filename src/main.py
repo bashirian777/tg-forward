@@ -17,6 +17,7 @@ from .web_server import WebServer
 from .models import ForwardTask
 from .validators import validate_channel_id, validate_delay_range
 from .temp_cleaner import cleanup_temp_dir
+from .workspace import WorkspaceStore
 
 
 logger = get_logger(__name__)
@@ -26,6 +27,7 @@ def _cleanup_stale_temp(config) -> None:
     """Remove stale files from the configured working directory once at startup."""
     temp_dir = getattr(config, 'temp_dir', 'temp') or 'temp'
     max_age = getattr(config, 'temp_max_age_hours', 24.0)
+    WorkspaceStore(temp_dir).adopt_legacy_artwork([task.task_id for task in config.tasks])
     result = cleanup_temp_dir(temp_dir, max_age_hours=max_age)
     if result.get("removed"):
         logger.info(
@@ -38,16 +40,16 @@ def _cleanup_stale_temp(config) -> None:
 async def login_flow(client: TelegramClientWrapper, phone: str) -> bool:
     """Interactive login flow."""
     await client.connect()
-    
+
     if await client.is_authorized():
         logger.info("Already logged in")
         return True
-    
+
     # Request code
     await client.login(phone)
     print(f"Verification code sent to {phone}")
     code = input("Enter verification code: ").strip()
-    
+
     try:
         await client.login(phone, code)
         logger.info("Login successful")
@@ -72,18 +74,18 @@ async def cmd_login(args, config_manager: ConfigManager) -> None:
 async def cmd_add_task(args, config_manager: ConfigManager) -> None:
     """Handle add-task command."""
     config_manager.load_config()
-    
+
     # Validate inputs
     valid, err = validate_channel_id(args.source)
     if not valid:
         print(f"Invalid source channel: {err}")
         return
-    
+
     valid, err = validate_channel_id(args.target)
     if not valid:
         print(f"Invalid target channel: {err}")
         return
-    
+
     valid, err = validate_delay_range(args.min_delay, args.max_delay)
     if not valid:
         print(f"Invalid delay range: {err}")
@@ -102,22 +104,22 @@ async def cmd_add_task(args, config_manager: ConfigManager) -> None:
         source_topic_id=args.source_topic,
         enabled=True
     )
-    
+
     config_manager.add_task(task)
     print(f"Task '{args.task_id}' added successfully")
 
 
-async def cmd_list_tasks(args, config_manager: ConfigManager, 
+async def cmd_list_tasks(args, config_manager: ConfigManager,
                         progress_tracker: ProgressTracker) -> None:
     """Handle list command."""
     config_manager.load_config()
     progress_tracker.load_progress()
-    
+
     config = config_manager.get_config()
     if not config or not config.tasks:
         print("No tasks configured")
         return
-    
+
     print("\nConfigured Tasks:")
     print("-" * 60)
     for task in config.tasks:
@@ -137,28 +139,28 @@ async def cmd_start(args, config_manager: ConfigManager,
     config = config_manager.load_config()
     progress_tracker.load_progress()
     _cleanup_stale_temp(config)
-    
+
     client = TelegramClientWrapper(config.api_id, config.api_hash)
     await client.connect()
-    
+
     if not await client.is_authorized():
         print("Not logged in. Run 'login' command first.")
         await client.disconnect()
         return
-    
+
     task_manager = TaskManager(
         client, config_manager, progress_tracker,
         temp_dir=getattr(config, 'temp_dir', 'temp') or 'temp'
     )
-    
+
     try:
         if args.task_id:
             await task_manager.start_task(args.task_id)
         else:
             await task_manager.start_all_tasks()
-        
+
         print("Forwarder running. Press Ctrl+C to stop.")
-        
+
         # Keep running until interrupted
         while True:
             await asyncio.sleep(1)
@@ -174,11 +176,11 @@ async def cmd_delete_task(args, config_manager: ConfigManager,
     """Handle delete command."""
     config_manager.load_config()
     progress_tracker.load_progress()
-    
+
     config_manager.remove_task(args.task_id)
     if args.delete_progress:
         progress_tracker.delete_progress(args.task_id)
-    
+
     print(f"Task '{args.task_id}' deleted")
 
 
@@ -187,26 +189,26 @@ async def cmd_bot(args, config_manager: ConfigManager,
     """Handle bot command - start the management bot."""
     config = config_manager.load_config()
     progress_tracker.load_progress()
-    
+
     if not config.bot_token:
         print("Error: bot_token not configured in config.json")
         return
-    
+
     if not config.admin_ids:
         print("Error: admin_ids not configured in config.json")
         return
-    
+
     _cleanup_stale_temp(config)
-    
+
     # Start user client for forwarding
     user_client = TelegramClientWrapper(config.api_id, config.api_hash)
     await user_client.connect()
-    
+
     if not await user_client.is_authorized():
         print("User not logged in. Run 'login' command first.")
         await user_client.disconnect()
         return
-    
+
     # Start bot
     bot = ForwarderBot(
         bot_token=config.bot_token,
@@ -215,14 +217,14 @@ async def cmd_bot(args, config_manager: ConfigManager,
         progress_tracker=progress_tracker,
         user_client=user_client
     )
-    
+
     # Start web server (optional, port from config or default 8080)
     web_port = getattr(config, 'web_port', 10082)
     web_server = None
-    
+
     try:
         await bot.start()
-        
+
         # Start web server after bot starts (need task_manager)
         web_server = WebServer(
             progress_tracker=progress_tracker,
@@ -231,7 +233,7 @@ async def cmd_bot(args, config_manager: ConfigManager,
             web_password=getattr(config, 'web_password', '')
         )
         await web_server.start()
-        
+
         print(f"Bot started. Web UI at http://127.0.0.1:{web_port}")
         print("Press Ctrl+C to stop.")
         await bot.run_forever()
@@ -306,12 +308,12 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log level"
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-    
+
     # Login command
     subparsers.add_parser("login", help="Login to Telegram")
-    
+
     # Add task command
     add_parser = subparsers.add_parser("add", help="Add a forwarding task")
     add_parser.add_argument("task_id", help="Unique task identifier")
@@ -325,20 +327,20 @@ def create_parser() -> argparse.ArgumentParser:
                           help="Minimum delay between messages (seconds)")
     add_parser.add_argument("--max-delay", type=float, default=20.0,
                           help="Maximum delay between messages (seconds)")
-    
+
     # List command
     subparsers.add_parser("list", help="List all tasks")
-    
+
     # Start command
     start_parser = subparsers.add_parser("start", help="Start forwarding")
     start_parser.add_argument("task_id", nargs="?", help="Task ID (optional)")
-    
+
     # Delete command
     del_parser = subparsers.add_parser("delete", help="Delete a task")
     del_parser.add_argument("task_id", help="Task ID to delete")
     del_parser.add_argument("--delete-progress", "-p", action="store_true",
                           help="Also delete progress data")
-    
+
     # Init command
     init_parser = subparsers.add_parser("init", help="Initialize configuration")
     init_parser.add_argument("--api-id", type=int, required=True)
@@ -347,7 +349,7 @@ def create_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--bot-token", default="", help="Bot token for management")
     init_parser.add_argument("--admin-id", type=int, action="append", dest="admin_ids",
                             default=[], help="Admin user ID (can specify multiple)")
-    
+
     # Bot command
     subparsers.add_parser("bot", help="Start the management bot")
 
@@ -365,12 +367,12 @@ async def main() -> None:
     """Main entry point."""
     parser = create_parser()
     args = parser.parse_args()
-    
+
     setup_logging(args.log_level)
-    
+
     config_manager = ConfigManager(args.config)
     progress_tracker = ProgressTracker(database=config_manager.db)
-    
+
     if args.command == "init":
         from .models import AppConfig
         config = AppConfig(

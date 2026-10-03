@@ -12,6 +12,7 @@ from .forwarder import Forwarder
 from .dedup_tracker import DedupTracker
 from .models import ForwardTask, TaskStatus, TaskProgress
 from .validators import validate_task
+from .workspace import WorkspaceStore
 
 
 logger = logging.getLogger(__name__)
@@ -233,7 +234,20 @@ class TaskManager:
     def get_transfer(self, task_id: str) -> Optional[dict]:
         return self.progress_tracker.get_transfer(task_id)
 
+    def cleanup_files(self, task_id=None, expired_only=False):
+        config = self.config_manager.get_config()
+        return WorkspaceStore(self.temp_dir).cleanup(task_id=task_id,
+            max_age_hours=config.temp_max_age_hours if expired_only else None)
+
+    async def cleanup_task_files(self, task_id):
+        await self.stop_task(task_id)
+        result = self.cleanup_files(task_id)
+        self.progress_tracker.clear_transfer(task_id)
+        self.config_manager.db.log_operation("cleanup_files", task_id=task_id, after_data=result)
+        return result
+
     def clear_transfer(self, task_id: str) -> None:
+        self.cleanup_files(task_id)
         self.progress_tracker.clear_transfer(task_id)
         self.config_manager.db.log_operation("clear_transfer", task_id=task_id)
 
@@ -248,6 +262,7 @@ class TaskManager:
         highest_id = max(message_ids)
         progress = self.progress_tracker.get_task_progress(task_id)
         self.progress_tracker.set_progress(task_id, highest_id, progress.forwarded_count)
+        self.cleanup_files(task_id)
         self.progress_tracker.clear_transfer(task_id)
         self.config_manager.db.log_operation(
             "skip_transfer", task_id=task_id,
@@ -289,8 +304,11 @@ class TaskManager:
         if task_id in self._tasks:
             await self.stop_task(task_id)
 
+        self.cleanup_files(task_id)
         # Remove from config
         self.config_manager.remove_task(task_id)
+        self.progress_tracker._download_progress.pop(task_id, None)
+        self._dedup_trackers.pop(task_id, None)
 
         # Optionally remove progress
         if delete_progress:

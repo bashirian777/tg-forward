@@ -231,10 +231,16 @@ class TelegramClientWrapper:
                     )
 
         logger.debug(f"Starting download: {filename}, size: {total_size}")
+        filename = _safe_name(filename or f"media_{message.id}")
+        if not os.path.splitext(filename)[1]:
+            import mimetypes
+            mime = getattr(getattr(message.media, "document", None), "mime_type", "image/jpeg")
+            filename += mimetypes.guess_extension(mime) or ".bin"
+        destination = os.path.join(path, f"{message.id}_{filename}")
         try:
             file_path = await self._client.download_media(
                 message,
-                file=path,
+                file=destination,
                 progress_callback=progress_callback
             )
         except FloodWaitError:

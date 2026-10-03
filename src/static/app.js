@@ -54,6 +54,8 @@ const get = (id) => document.getElementById(id);
 
 const AUTH_TOKEN_KEY = "tg_forwarder_web_token";
 let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
+const AUTH_EXPIRY_KEY = "tg_forwarder_web_expiry";
+let authExpiresAt = Number(localStorage.getItem(AUTH_EXPIRY_KEY)) || 0;
 let refreshTimer = null;
 const state = { tasks: [], system: null, config: null, logs: [] };
 let taskFilter = "all";
@@ -78,6 +80,8 @@ async function apiFetch(url, options = {}) {
   if (response.status === 401) {
     authToken = "";
     localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_EXPIRY_KEY);
+    authExpiresAt = 0;
     showGate("登录已过期，请重新输入密码");
   }
   return response;
@@ -100,6 +104,8 @@ get("auth-form").addEventListener("submit", async (event) => {
     if (!response.ok) throw new Error("invalid");
     authToken = data.token || "";
     if (authToken) localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+    authExpiresAt = Number(data.expires_at) || 0;
+    localStorage.setItem(AUTH_EXPIRY_KEY, String(authExpiresAt));
     get("auth-form").reset();
     showApp();
   } catch (e) {
@@ -440,6 +446,8 @@ function renderConfig() {
   get("config-cleanup").textContent = c.temp_max_age_hours + " 小时";
   get("config-password").textContent = c.web_password_configured ? "已设置" : "未设置";
   get("config-storage-source").textContent = c.storage_source || "SQLite";
+  get("config-auth-ttl").textContent = c.web_auth_ttl_hours + " 小时";
+  get("auth-expiry").textContent = authExpiresAt ? "本次登录到期：" + new Date(authExpiresAt * 1000).toLocaleString() : "未启用登录有效期";
 }
 let logsSig = "";
 function renderLogs() {
@@ -600,6 +608,9 @@ get("task-search").addEventListener("input", (event) => {
 
 /* ---------- task form (create / edit 共用) ---------- */
 let editingTaskId = null;
+let editingTaskRevision = null;
+let editingTaskConfig = null;
+let editingConfigRevision = null;
 function formLines(id) { return get(id).value.split("\n").map((v) => v.trim()).filter(Boolean); }
 
 function updateFormDependencies() {
@@ -669,8 +680,15 @@ async function openTaskModal(taskId = null) {
     if (taskId) {
       const data = await (await apiFetch("/api/tasks/" + encodeURIComponent(taskId))).json();
       setTaskForm(data.config || {});
+      editingTaskRevision = data.revision;
+      editingTaskConfig = data.config;
+      get("source-reset-options").hidden = false;
+      get("source-reset-id").value = 0;
+      get("source-reset-dedup").checked = true;
     } else {
       setTaskForm({});
+      editingTaskConfig = null;
+      get("source-reset-options").hidden = true;
     }
     get("task-form-id").disabled = !!taskId;
     get("task-id-hint").textContent = taskId ? "任务 ID 不可修改，避免断点和去重数据失去关联" : "仅允许字母、数字、下划线和短横线";
@@ -686,7 +704,7 @@ function validateTaskForm() {
   const target = get("task-form-target").value;
   const min = Number(get("task-form-min").value);
   const max = Number(get("task-form-max").value);
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return "任务 ID 仅允许字母、数字、下划线和短横线，长度 1-64";
+  if (!/^[A-Za-z0-9_-]{1,48}$/.test(id)) return "任务 ID 仅允许字母、数字、下划线和短横线，长度 1-48";
   if (!source || !target) return "源频道和目标频道不能为空";
   const sourceTopic = get("task-form-source-topic").value;
   if (sourceTopic && (!Number.isInteger(Number(sourceTopic)) || Number(sourceTopic) < 1)) return "来源话题 ID 必须是正整数";
@@ -760,6 +778,11 @@ get("task-form").addEventListener("submit", async (event) => {
 
     let response;
     if (editingTaskId) {
+      task.revision = editingTaskRevision;
+      if (editingTaskConfig.source_channel !== task.source_channel || (editingTaskConfig.source_topic_id ?? null) !== task.source_topic_id) {
+        if (!await askConfirm("更换来源", "将清理旧传输并使用新起点和所选去重设置，确认更换来源？", true)) return;
+        task.source_reset = { last_message_id: Number(get("source-reset-id").value), clear_dedup: get("source-reset-dedup").checked };
+      }
       response = await apiFetch("/api/tasks/" + encodeURIComponent(editingTaskId), {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(task)
       });
@@ -902,6 +925,11 @@ async function openConfigModal() {
   get("config-form-concurrency").value = c.max_concurrent_tasks || 1;
   get("config-form-mindisk").value = c.min_free_disk_mb || 0;
   get("config-form-cleanup").value = c.temp_max_age_hours || 0;
+  get("config-form-ttl").value = c.web_auth_ttl_hours;
+  get("config-form-port").value = c.web_port;
+  get("config-form-download").value = c.download_workers;
+  get("config-form-upload").value = c.upload_workers;
+  editingConfigRevision = c.revision;
   get("config-form-password").value = "";
   get("config-form-error").textContent = "";
   openModal("config-modal");
@@ -917,7 +945,12 @@ get("config-form").addEventListener("submit", async (event) => {
     temp_dir: get("config-form-temp").value.trim(),
     max_concurrent_tasks: Number(get("config-form-concurrency").value),
     min_free_disk_mb: Number(get("config-form-mindisk").value),
-    temp_max_age_hours: Number(get("config-form-cleanup").value)
+    temp_max_age_hours: Number(get("config-form-cleanup").value),
+    web_auth_ttl_hours: Number(get("config-form-ttl").value),
+    web_port: Number(get("config-form-port").value),
+    download_workers: Number(get("config-form-download").value),
+    upload_workers: Number(get("config-form-upload").value),
+    revision: editingConfigRevision
   };
   const password = get("config-form-password").value;
   if (password) payload.web_password = password;
@@ -926,16 +959,27 @@ get("config-form").addEventListener("submit", async (event) => {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
     });
     const data = await response.json().catch(() => ({}));
-    if (response.status === 409) throw new Error("还有任务在运行，请先停止全部任务再修改配置");
+    if (data.error === "stop_all_tasks_before_editing_config") throw new Error("还有任务在运行，请先停止全部任务再修改传输参数");
     if (!response.ok) throw new Error(data.error || "保存配置失败");
     closeModal("config-modal");
-    showToast("配置已保存");
+    showToast(data.restart_required ? "配置已保存，Web 端口需重启服务生效" : "配置已保存");
     await refresh();
   } catch (e) {
     error.textContent = e.message || "保存失败";
   } finally {
     setBusy(submit, false);
   }
+});
+
+get("cleanup-temp-btn").addEventListener("click", async () => {
+  if (!await askConfirm("清理临时文件", "删除非活动传输的媒体、未完成文件、缩略图和封面；活动传输保留。删除后失败任务需要重新下载。", true)) return;
+  try {
+    const response = await apiFetch("/api/cleanup", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "清理失败");
+    showToast("已删除 " + data.removed + " 个文件，释放 " + (data.freed_bytes / 1024 / 1024).toFixed(1) + " MB" + (data.errors?.length ? "，部分删除失败" : ""));
+    await refresh();
+  } catch (error) { showToast(error.message); }
 });
 
 /* ---------- navigation ---------- */

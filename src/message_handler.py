@@ -12,6 +12,8 @@ from .telegram_client import TelegramClientWrapper
 from .models import ForwardResult
 from .dedup_tracker import DedupTracker
 from .errors import is_permanent_error
+from .workspace import WorkspaceStore
+from .database import Database
 from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError
 
 COPY_FALLBACK_ERRORS = (ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError)
@@ -31,6 +33,8 @@ class MessageHandler:
         self.dedup_tracker = dedup_tracker
         self.progress_tracker = getattr(client, "_progress_tracker", None)
         self.min_free_disk_mb = max(0, int(min_free_disk_mb))
+        self.workspaces = WorkspaceStore(temp_dir)
+        self._managed = False
         os.makedirs(temp_dir, exist_ok=True)
 
     async def _wait_for_disk_space(self, message: Message = None, task_id: str = None) -> None:
@@ -158,7 +162,26 @@ class MessageHandler:
             or self._message_topic_id(message) == topic_id
         ]
 
-    async def forward_message_group(self, messages: List[Message],
+    async def forward_message_group(self, messages, source_channel, target_channel, **kwargs):
+        task_id = kwargs.get("task_id")
+        if not task_id or not isinstance(getattr(self.progress_tracker, "db", None), Database):
+            return await self._forward_message_group(messages, source_channel, target_channel, **kwargs)
+        original = self.temp_dir
+        path = self.workspaces.open(task_id, source_channel, [m.id for m in messages])
+        self.temp_dir = str(path)
+        self._managed = True
+        try:
+            result = await self._forward_message_group(messages, source_channel, target_channel, **kwargs)
+            if result.success:
+                self.workspaces.release(path)
+                self.workspaces.cleanup(only_path=path)
+            return result
+        finally:
+            self._managed = False
+            self.temp_dir = original
+            self.workspaces.release(path)
+
+    async def _forward_message_group(self, messages: List[Message],
                                     source_channel: int,
                                     target_channel: int,
                                     caption_prefix: str = "",
@@ -404,10 +427,11 @@ class MessageHandler:
             logger.error(f"Download album failed: {e}")
             return ForwardResult(success=False, method="download", error=str(e))
         finally:
-            for path in file_paths:
-                self._cleanup_file(path)
-            for path in all_artwork_paths:
-                self._cleanup_file(path)
+            if not self._managed:
+                for path in file_paths:
+                    self._cleanup_file(path)
+                for path in all_artwork_paths:
+                    self._cleanup_file(path)
 
     async def forward_message(self, message: Message,
                              source_channel: int,
@@ -520,11 +544,12 @@ class MessageHandler:
             logger.error(f"Download and send failed: {e}")
             return False
         finally:
-            if file_path:
-                self._cleanup_file(file_path)
-            if artwork:
-                for path in artwork.paths:
-                    self._cleanup_file(path)
+            if not self._managed:
+                if file_path:
+                    self._cleanup_file(file_path)
+                if artwork:
+                    for path in artwork.paths:
+                        self._cleanup_file(path)
 
     def _cleanup_file(self, file_path: str) -> None:
         try:

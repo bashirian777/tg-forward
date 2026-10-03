@@ -13,6 +13,8 @@ from aiohttp import web
 from .models import ForwardTask
 from .validators import validate_task, validate_app_config
 from .database import ConfigurationConflict
+from .workspace import WorkspaceStore
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,13 @@ class WebServer:
         self.web_password = web_password or ""
         self._auth_tokens = {}
         self._auth_token_ttl = 24 * 60 * 60
+        config = task_manager.config_manager.get_config() if task_manager else None
+        if config:
+            self._auth_token_ttl = config.web_auth_ttl_hours * 3600
         self._started_at = time.time()
         self._app = None
         self._runner = None
+        self._cleanup_task = None
 
     async def start(self):
         """Start the web server."""
@@ -64,23 +70,52 @@ class WebServer:
         self._app.router.add_put("/api/config", self.handle_api_update_config)
         self._app.router.add_post("/api/config/sync-json", self.handle_api_sync_json)
         self._app.router.add_post("/api/config/backup", self.handle_api_backup)
+        self._app.router.add_post("/api/cleanup", self.handle_api_cleanup)
+        self._app.router.add_post("/api/tasks/{task_id}/cleanup", self.handle_api_task_cleanup)
 
         self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info(f"Web server started at http://{self.host}:{self.port}")
 
     async def stop(self):
         """Stop the web server."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
         if self._runner:
             await self._runner.cleanup()
+
+    async def _cleanup_loop(self):
+        while True:
+            await asyncio.sleep(600)
+            try:
+                self.task_manager.cleanup_files(expired_only=True)
+            except Exception:
+                logger.exception("Periodic temp cleanup failed")
+
+    async def handle_api_cleanup(self, request):
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response(self.task_manager.cleanup_files())
+
+    async def handle_api_task_cleanup(self, request):
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response(await self.task_manager.cleanup_task_files(request.match_info["task_id"]))
 
     def _is_authorized(self, request) -> bool:
         """Validate a short-lived browser token for protected API calls."""
         if not self.web_password:
             return True
 
+        now = time.time()
+        self._auth_tokens = {token: expiry for token, expiry in self._auth_tokens.items() if expiry > now}
         authorization = request.headers.get("Authorization", "")
         if not authorization.startswith("Bearer "):
             return False
@@ -99,20 +134,26 @@ class WebServer:
             return web.json_response({"auth_required": False, "token": ""})
 
         try:
-            payload = await request.json()
-            password = str(payload.get("password", ""))
+            payload = await self._json_body(request)
+            password = payload.get("password", "")
+            if not isinstance(password, str):
+                raise ValueError("Password must be a string")
         except (json.JSONDecodeError, TypeError, ValueError):
             password = ""
 
-        if not hmac.compare_digest(password, self.web_password):
+        if not hmac.compare_digest(password.encode("utf-8"), self.web_password.encode("utf-8")):
             return web.json_response({"error": "invalid_password"}, status=401)
 
+        now = time.time()
+        self._auth_tokens = {token: expiry for token, expiry in self._auth_tokens.items() if expiry > now}
         token = secrets.token_urlsafe(32)
-        self._auth_tokens[token] = time.time() + self._auth_token_ttl
+        expires_at = now + self._auth_token_ttl
+        self._auth_tokens[token] = expires_at
         return web.json_response({
             "auth_required": True,
             "token": token,
-            "expires_in": self._auth_token_ttl
+            "expires_in": self._auth_token_ttl,
+            "expires_at": expires_at,
         })
 
     async def handle_index(self, request):
@@ -174,6 +215,7 @@ class WebServer:
             },
             "temp_dir": temp_dir,
             "temp_exists": temp_exists,
+            "temp_files": WorkspaceStore(temp_dir).stats(),
             "temp_disk": {
                 "total": temp_usage.total,
                 "used": temp_usage.used,

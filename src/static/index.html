@@ -104,6 +104,8 @@
             <div class="config-item"><span class="k"><span data-icon="clock"></span>临时文件保留周期</span><span class="v" id="config-cleanup">—</span></div>
             <div class="config-item"><span class="k"><span data-icon="lock"></span>Web 管理密码</span><span class="v" id="config-password">—</span></div>
             <div class="config-item"><span class="k"><span data-icon="database"></span>当前数据源</span><span class="v" id="config-storage-source">SQLite</span><span class="sub">JSON 仅用于首次迁移、备份和导出</span></div>
+            <div class="config-item"><span class="k"><span data-icon="clock"></span>登录有效期</span><span class="v" id="config-auth-ttl">—</span><span class="sub" id="auth-expiry">—</span></div>
+            <div class="config-item action"><button class="btn" id="cleanup-temp-btn"><span data-icon="trash"></span><span>清理临时文件</span></button></div>
             <div class="config-item action"><button class="btn" id="edit-config-btn"><span data-icon="edit"></span><span>编辑配置</span></button></div>
             <div class="config-item action"><button class="btn" id="sync-json-btn"><span data-icon="database"></span><span>同步到 JSON</span></button></div>
           </div>
@@ -137,7 +139,7 @@
         <div class="form-grid">
           <div class="form-field">
             <label for="task-form-id"><span data-icon="hash"></span>任务 ID</label>
-            <input id="task-form-id" required maxlength="64" placeholder="例如 daily_forward" autocomplete="off">
+            <input id="task-form-id" required maxlength="48" placeholder="例如 daily_forward" autocomplete="off">
             <span class="hint" id="task-id-hint">仅允许字母、数字、下划线和短横线</span>
           </div>
           <div class="form-field">
@@ -184,12 +186,17 @@
             <label for="task-form-hashtags"><span data-icon="tag"></span>必须包含的 Hashtag（每行一个）</label>
             <textarea id="task-form-hashtags" placeholder="至少包含其中一个才会转发"></textarea>
           </div>
+          <div class="form-field full" id="source-reset-options" hidden>
+            <label for="source-reset-id">更换来源后的起始消息 ID</label><input id="source-reset-id" type="number" min="0" value="0">
+            <label><input id="source-reset-dedup" type="checkbox" checked>清空旧来源的去重记录</label>
+            <span class="hint">更换来源频道或话题时，将清理旧传输记录并使用此起点</span>
+          </div>
           <div class="form-field full">
             <div class="switches" id="task-switches">
               <label class="switch"><input id="task-form-enabled" type="checkbox"><span class="track"></span><span class="copy"><span class="title">启用任务</span><span class="desc">关闭后任务不会自动启动</span></span></label>
               <label class="switch"><input id="task-form-hide" type="checkbox" checked><span class="track"></span><span class="copy"><span class="title">隐藏来源</span><span class="desc">目标中不显示“转发自”来源</span></span></label>
               <label class="switch" id="remove-switch"><input id="task-form-remove" type="checkbox"><span class="track"></span><span class="copy"><span class="title">删除已匹配 Hashtag</span><span class="desc">转发时移除上面填写的标签</span></span></label>
-              <label class="switch"><input id="task-form-send-as" type="checkbox"><span class="track"></span><span class="copy"><span class="title">以目标频道身份发送</span><span class="desc">需要机器人在目标频道拥有管理员权限</span></span></label>
+              <label class="switch"><input id="task-form-send-as" type="checkbox"><span class="track"></span><span class="copy"><span class="title">以目标频道身份发送</span><span class="desc">需要登录的用户账号在目标频道拥有管理员权限</span></span></label>
               <label class="switch"><input id="task-form-dedup" type="checkbox"><span class="track"></span><span class="copy"><span class="title">基于文件去重</span><span class="desc">避免重复转发同一媒体文件</span></span></label>
             </div>
           </div>
@@ -248,7 +255,7 @@
       <div class="modal-head">
         <div>
           <h2>编辑运行配置</h2>
-          <div class="subtitle">任务运行时不可修改，需先停止全部任务</div>
+          <div class="subtitle">登录设置可随时修改；修改传输参数需先停止全部任务</div>
         </div>
         <button class="modal-close" data-close="config-modal" aria-label="关闭"><span data-icon="x"></span></button>
       </div>
@@ -258,6 +265,10 @@
           <div class="form-field"><label for="config-form-concurrency">最大并发媒体组</label><input id="config-form-concurrency" type="number" min="1" required></div>
           <div class="form-field"><label for="config-form-mindisk">最低剩余磁盘（MB）</label><input id="config-form-mindisk" type="number" min="0" required></div>
           <div class="form-field full"><label for="config-form-cleanup">临时文件保留周期（小时）</label><input id="config-form-cleanup" type="number" min="0" step="0.1" required></div>
+          <div class="form-field"><label for="config-form-download">下载分块并发数</label><input id="config-form-download" type="number" min="1" max="16" required></div>
+          <div class="form-field"><label for="config-form-upload">上传分块并发数</label><input id="config-form-upload" type="number" min="1" max="16" required></div>
+          <div class="form-field"><label for="config-form-port">Web 端口</label><input id="config-form-port" type="number" min="1" max="65535" required><span class="hint">修改后需重启服务生效</span></div>
+          <div class="form-field"><label for="config-form-ttl">登录有效期（小时）</label><input id="config-form-ttl" type="number" min="0.001" step="any" required><span class="hint">影响下次登录，页面刷新不延长有效期</span></div>
           <div class="form-field full"><label for="config-form-password">Web 管理密码</label><input id="config-form-password" type="password" autocomplete="new-password" placeholder="留空表示不修改"><span class="hint">修改后现有登录会立即失效</span></div>
         </div>
         <div class="modal-error" id="config-form-error"></div>
