@@ -5,6 +5,7 @@ PERMANENT_NAMES = (
     "ChatWriteForbiddenError", "ChatAdminRequiredError", "ChannelPrivateError",
     "UserBannedInChannelError", "ChatSendMediaForbiddenError", "ChatSendPhotosForbiddenError",
     "ChatSendVideosForbiddenError", "PeerIdInvalidError", "MessageIdInvalidError",
+    "MediaCaptionTooLongError", "MediaEmptyError", "PhotoInvalidError", "DocumentInvalidError",
 )
 PERMANENT_ERRORS = tuple(getattr(errors, name) for name in PERMANENT_NAMES if hasattr(errors, name))
 

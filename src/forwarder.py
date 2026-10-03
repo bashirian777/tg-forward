@@ -110,10 +110,13 @@ class Forwarder:
                         async with self._group_semaphore:
                             # Never start a new send after pausing while queued.
                             if self._paused:
-                                continue
+                                # Re-fetch from the safe checkpoint after resume,
+                                # preserving order instead of moving to the next group.
+                                break
                             if not self._running:
                                 break
                             self.progress_tracker.begin_transfer(task.task_id, [m.id for m in group], sum(self.message_handler.is_media_message(m) for m in group))
+                            self.progress_tracker.update_transfer(task.task_id, {"ordered_ids": self._ordered_ids})
                             result = await self.process_message_group(group, task, original_group)
                         if result == "failed":
                             self.progress_tracker.mark_transfer_state(task.task_id, "interrupted")

@@ -96,6 +96,8 @@ class MessageHandler:
             free_bytes = shutil.disk_usage(self.temp_dir).free
             if free_bytes >= minimum_free + required_bytes:
                 return
+            if self.progress_tracker and task_id:
+                self.progress_tracker.update_transfer(task_id, {"state": "waiting_disk", "speed_str": "等待磁盘空间"})
 
             logger.warning(
                 "[%s] Waiting for local disk space: %.1f MB free, "

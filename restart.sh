@@ -6,11 +6,16 @@ LOG_DIR="$ROOT_DIR/logs"
 LOG_FILE="$LOG_DIR/bot.log"
 PID_FILE="$ROOT_DIR/bot.pid"
 
-# Match only this project's bot command, so other Python services are unaffected.
+# Select only bot commands whose working directory is this project.
 BOT_PATTERN='[p]ython(3(\.[0-9]+)?)? -m src\.main bot'
 
 printf '%s\n' 'Stopping existing bot processes...'
-mapfile -t OLD_PIDS < <(pgrep -f "$BOT_PATTERN" || true)
+OLD_PIDS=()
+while read -r pid; do
+    if [[ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)" == "$ROOT_DIR" ]]; then
+        OLD_PIDS+=("$pid")
+    fi
+done < <(pgrep -f "$BOT_PATTERN" || true)
 
 if ((${#OLD_PIDS[@]} > 0)); then
     kill -TERM "${OLD_PIDS[@]}" 2>/dev/null || true

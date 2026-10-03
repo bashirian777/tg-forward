@@ -7,13 +7,12 @@
   "temp_dir": "temp",
   "temp_max_age_hours": 24.0,
   "web_password": "change-this-password",
+  "web_auth_ttl_hours": 24.0,
+  "web_port": 10082,
+  "download_workers": 4,
+  "upload_workers": 4,
   "max_concurrent_tasks": 1,
   "min_free_disk_mb": 1024,
-  "proxy": {
-    "proxy_type": "socks5",
-    "addr": "127.0.0.1",
-    "port": 1080
-  },
   "tasks": [
     {
       "task_id": "example_task",

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import signal
 import tempfile
 
 from .logger import setup_logging, get_logger
@@ -168,6 +169,7 @@ async def cmd_start(args, config_manager: ConfigManager,
         print("\nStopping...")
         await task_manager.stop_all_tasks()
     finally:
+        await task_manager.stop_all_tasks()
         await client.disconnect()
 
 
@@ -374,6 +376,8 @@ async def main() -> None:
     progress_tracker = ProgressTracker(database=config_manager.db)
 
     if args.command == "init":
+        if config_manager.db.get_app_config():
+            raise ValueError("Configuration already exists; edit it through the management interface")
         from .models import AppConfig
         config = AppConfig(
             api_id=args.api_id,
@@ -408,10 +412,22 @@ async def main() -> None:
     else:
         parser.print_help()
 
+async def _run_with_signals():
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, current.cancel)
+    try:
+        await main()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(signum)
+
 
 def run():
-    """Entry point for the application."""
-    asyncio.run(main())
+    asyncio.run(_run_with_signals())
 
 
 if __name__ == "__main__":

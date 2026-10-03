@@ -14,7 +14,7 @@ from telethon.errors import (
 )
 
 from .media_artwork import MediaArtwork, artwork_sizes, normalize_artwork
-from .errors import is_permanent_error
+from .errors import is_permanent_error, PermanentTransferError
 from .database import Database
 from .reliable_sender import ReliableSender, encode_media, decode_media
 from .transfer import ParallelTransfer
@@ -164,6 +164,7 @@ class TelegramClientWrapper:
     async def send_existing_media(self, entity, media, *, task_id=None, message_ids=None, caption=None, reply_to=None, send_as=None, source=None):
         tracker = self._progress_tracker
         if tracker and task_id and isinstance(getattr(tracker, "db", None), Database):
+            tracker.update_transfer(task_id, {"state": "sending", "speed_str": "等待 Telegram 确认"})
             return await ReliableSender(self._client, tracker.db).send(
                 entity, media, task_id=task_id, message_ids=message_ids,
                 caption=caption, reply_to=reply_to, send_as=send_as, source=source)
@@ -250,12 +251,14 @@ class TelegramClientWrapper:
                     try:
                         file_path = await ParallelTransfer(self._client, self.download_workers, self.upload_workers).download(message, destination, progress_callback)
                         break
-                    except (FileReferenceExpiredError, FilerefUpgradeNeededError):
+                    except (FileReferenceExpiredError, FilerefUpgradeNeededError) as error:
                         if attempt:
-                            raise
-                        fresh = await self._refresh_artwork_message(message)
-                        if fresh.media.document.id != document.id:
-                            raise
+                            raise PermanentTransferError("Source file reference remains invalid; inspect or skip this group") from error
+                        peer = message.input_chat or message.chat_id
+                        fresh = await self._client.get_messages(peer, ids=message.id)
+                        fresh_doc = getattr(getattr(fresh, "media", None), "document", None)
+                        if not fresh_doc or fresh_doc.id != document.id:
+                            raise PermanentTransferError("Source media was deleted or replaced; inspect or skip this group") from error
                         message = fresh
                     except Exception as error:
                         # The standard downloader handles CDN redirects and
@@ -263,6 +266,8 @@ class TelegramClientWrapper:
                         from telethon.client.downloads import _CdnRedirect
                         if not isinstance(error, _CdnRedirect):
                             raise
+                        Path(destination + ".part").unlink(missing_ok=True)
+                        Path(destination + ".download.json").unlink(missing_ok=True)
                         file_path = await self._client.download_media(message, file=destination, progress_callback=progress_callback)
                         break
             else:
@@ -409,6 +414,11 @@ class TelegramClientWrapper:
             fresh = await self._client.get_messages(peer, ids=message.id)
             original_doc = getattr(message.media, "document", None)
             fresh_doc = getattr(getattr(fresh, "media", None), "document", None)
+            if not original_doc and not fresh_doc:
+                old_photo = getattr(message.media, "photo", None)
+                new_photo = getattr(getattr(fresh, "media", None), "photo", None)
+                if old_photo and new_photo and old_photo.id == new_photo.id:
+                    return fresh
             if original_doc and fresh_doc and original_doc.id == fresh_doc.id:
                 return fresh
             logger.warning("Artwork message %s is missing or its media changed", message.id)

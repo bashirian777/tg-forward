@@ -91,3 +91,28 @@ async def test_retry_keeps_same_random_id_after_response_loss(state):
     assert requests[0].random_id == requests[1].random_id
     assert await sender.send("target", media, task_id="task", message_ids=[10])
     assert client.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_random_id_is_recorded_without_changing_identity(state):
+    from telethon.errors import RandomIdDuplicateError
+    cm, _, _ = state
+    client = AsyncMock(side_effect=RandomIdDuplicateError(None))
+    client.get_input_entity.return_value = types.InputPeerChannel(2, 3)
+    sender = ReliableSender(client, cm.db)
+    media = types.InputMediaPhoto(types.InputPhoto(1, 2, b"ref"))
+    assert await sender.send("target", media, task_id="task", message_ids=[10])
+    assert await sender.send("target", media, task_id="task", message_ids=[10])
+    assert client.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_skip_album_does_not_skip_interleaved_message(state):
+    cm, tracker, _ = state
+    mgr = manager(state)
+    tracker.begin_transfer("task", [1, 3], 2)
+    tracker.update_transfer("task", {"ordered_ids": [1, 2, 3]})
+    assert mgr.skip_transfer("task") == 1
+    assert tracker.get_last_message_id("task") == 1
+    assert 3 in tracker.completed_ids("task")
+    assert 2 not in tracker.completed_ids("task")

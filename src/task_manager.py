@@ -147,6 +147,8 @@ class TaskManager:
                 await self._tasks[task_id]
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("Task %s exited with an error", task_id)
 
         # Flush dedup records to disk
         if task_id in self._dedup_trackers:
@@ -213,6 +215,7 @@ class TaskManager:
                 raise ValueError("New source checkpoint must be a nonnegative integer")
         self.config_manager.update_task(task, expected_revision, source_reset if source_changed else None)
         if source_changed:
+            self.cleanup_files(task.task_id)
             self.progress_tracker.load_progress()
             self._dedup_trackers.pop(task.task_id, None)
         self.config_manager.db.log_operation(
@@ -259,23 +262,23 @@ class TaskManager:
         self.config_manager.db.log_operation("clear_transfer", task_id=task_id)
 
     def skip_transfer(self, task_id: str) -> int:
-        """Explicitly skip the interrupted group and advance past its highest ID."""
+        """Skip only this group, retaining pending interleaved source messages."""
         transfer = self.progress_tracker.get_transfer(task_id)
         if not transfer:
             raise ValueError("No active transfer for this task")
         message_ids = [int(value) for value in transfer.get("message_ids", [])]
         if not message_ids:
             raise ValueError("Active transfer has no message IDs")
-        highest_id = max(message_ids)
-        progress = self.progress_tracker.get_task_progress(task_id)
-        self.progress_tracker.set_progress(task_id, highest_id, progress.forwarded_count)
+        self.progress_tracker.complete_group(task_id, message_ids, "explicit_skip", 0,
+            transfer.get("ordered_ids") or message_ids)
+        checkpoint = self.progress_tracker.get_last_message_id(task_id)
         self.cleanup_files(task_id)
         self.progress_tracker.clear_transfer(task_id)
         self.config_manager.db.log_operation(
             "skip_transfer", task_id=task_id,
-            after_data={"skipped_message_ids": message_ids, "new_last_message_id": highest_id}
+            after_data={"skipped_message_ids": message_ids, "new_last_message_id": checkpoint}
         )
-        return highest_id
+        return checkpoint
 
 
     def get_dedup_stats(self, task_id: str) -> dict:

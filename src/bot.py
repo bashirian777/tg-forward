@@ -587,18 +587,17 @@ class ForwarderBot:
     async def _handle_reload(self, event) -> None:
         """Handle reload config command."""
         try:
-            # Reload config from file
+            if self._task_manager.has_running_tasks():
+                raise ValueError("请先停止全部任务再重载配置")
             self.config_manager.reload()
-            config = self.config_manager.get_config()
-            task_count = len(config.tasks) if config else 0
-            
-            # Reload progress from file
             self.progress_tracker.load_progress()
+            self._task_manager.refresh_runtime_limits()
+            task_count = len(self.config_manager.get_config().tasks)
             
             msg = (
                 "🔄 **配置已重载**\n\n"
-                f"✅ 成功从文件重新加载配置\n"
-                f"✅ 成功从文件重新加载进度\n"
+                f"✅ 成功从 SQLite 重新加载配置\n"
+                f"✅ 成功从 SQLite 重新加载进度\n"
                 f"📋 当前任务数: {task_count}\n\n"
                 "⚠️ 注意：正在运行的任务不会自动更新，\n"
                 "需要停止后重新启动才能应用新配置"

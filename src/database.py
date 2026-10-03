@@ -389,6 +389,10 @@ class Database:
                 (task_id, checkpoint, progress["last_forward_time"], progress["forwarded_count"], self._now()),
             )
             db.execute("DELETE FROM processed_messages WHERE task_id=? AND message_id<=?", (task_id, checkpoint))
+            for intent in db.execute("SELECT intent_key,data FROM send_intents WHERE task_id=?", (task_id,)).fetchall():
+                saved = json.loads(intent["data"])
+                if saved.get("sent") and saved.get("message_ids") and max(saved["message_ids"]) <= checkpoint:
+                    db.execute("DELETE FROM send_intents WHERE task_id=? AND intent_key=?", (task_id, intent["intent_key"]))
             return progress
 
     def reset_task_state(self, task_id, clear_dedup=False):

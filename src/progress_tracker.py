@@ -170,8 +170,6 @@ class ProgressTracker:
     def mark_transfer_state(self, task_id: str, state: str) -> None:
         transfer = self.get_transfer(task_id)
         if transfer:
-            if state == "interrupted" and transfer.get("state") == "error":
-                return
             transfer["state"] = state
             self.update_transfer(task_id, transfer)
 

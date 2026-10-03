@@ -123,3 +123,21 @@ async def test_cancellation_joins_workers_before_return(tmp_path):
         await runner
     assert client.active == 0
     assert load_manifest(str(tmp_path / "file") + ".download.json")["blocks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_complete_download_retry_preserves_upload_identity(tmp_path):
+    data = b"x" * (PART_SIZE * 2 + 15)
+    client = Client(data)
+    out = tmp_path / "video.mp4"
+    transfer = ParallelTransfer(client, 1, 1)
+    await transfer.download(message(data), out)
+    modified = out.stat().st_mtime_ns
+    client.failures = {1}
+    with pytest.raises(RuntimeError):
+        await transfer.upload(out)
+    original_id = load_manifest(str(out) + ".upload.json")["file_id"]
+    client.failures.clear()
+    await transfer.download(message(data), out)
+    assert out.stat().st_mtime_ns == modified
+    assert (await transfer.upload(out)).id == original_id

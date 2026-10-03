@@ -122,7 +122,8 @@ class ParallelTransfer:
             await run_workers((i for i in range(count) if str(i) not in valid), min(self.download_workers, max(1, count)), fetch)
             if len(state["blocks"]) != count or current != size:
                 raise OSError("Downloaded file has missing blocks")
-            os.ftruncate(fd, size)
+            if os.fstat(fd).st_size != size:
+                os.ftruncate(fd, size)
             os.fsync(fd)
             atomic_json(manifest_path, state)
         finally:
@@ -140,7 +141,7 @@ class ParallelTransfer:
         state = load_manifest(manifest)
         if state.get("identity") != identity or time.time() - state.get("created_at", 0) > 3600:
             state = {"identity": identity, "file_id": secrets.randbits(63), "created_at": time.time(), "parts": []}
-        completed = set(state["parts"])
+        completed = {i for i in state.get("parts", []) if type(i) is int and 0 <= i < math.ceil(size / PART_SIZE)}
         count = math.ceil(size / PART_SIZE)
         if not count:
             raise ValueError("Cannot upload an empty file")

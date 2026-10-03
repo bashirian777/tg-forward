@@ -1,5 +1,6 @@
 """Configuration access with record-level optimistic concurrency."""
 import os
+import json
 from copy import deepcopy
 from typing import Optional
 
@@ -22,10 +23,10 @@ class ConfigManager:
         self.db.ensure_legacy_migration(self.config_path)
         # Read values and revisions from the same snapshot.
         with self.db.connection() as db:
+            db.execute("BEGIN")
             row = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
             if not row:
                 raise FileNotFoundError(f"Config not found: {self.config_path}")
-            import json
             app = json.loads(row["data"])
             self._app_revision = row["revision"]
             tasks = db.execute("SELECT data,revision,task_id FROM tasks ORDER BY task_id").fetchall()
@@ -46,6 +47,12 @@ class ConfigManager:
 
     def save_config(self, config):
         """Bootstrap or save changed records; removals require explicit delete."""
+        config = deepcopy(config)
+        validate_app_config(config)
+        for task in config.tasks:
+            validate_task(task)
+        if len({task.task_id for task in config.tasks}) != len(config.tasks):
+            raise ValueError("Task IDs must be unique")
         if not self.db.get_app_config():
             values = config.to_dict()
             tasks = values.pop("tasks")

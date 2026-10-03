@@ -298,7 +298,7 @@ function buildTaskCard(t) {
   const cfg = t.config || {};
   const prog = t.progress || {};
   const cls = t.status === "running" ? "running" : t.status === "paused" ? "paused" : "stopped";
-  const label = t.status === "running" ? "运行中" : t.status === "paused" ? "已暂停" : "已停止";
+  const label = t.status === "running" ? "运行中" : t.status === "paused" ? "已暂停" : t.status === "error" ? "需要处理错误" : "已停止";
   const action = t.status === "running" ? "pause" : t.status === "paused" ? "resume" : "start";
   const actionLabel = t.status === "running" ? "暂停" : t.status === "paused" ? "恢复" : "启动";
   const actionIcon = t.status === "running" ? "pause" : t.status === "paused" ? "resume" : "play";
@@ -309,7 +309,8 @@ function buildTaskCard(t) {
     const isUp = d.type === "upload";
     const pct = Math.max(0, Math.min(100, Number(d.percent) || 0));
     const failed = d.state === "error";
-    const stText = failed ? "传输失败" : d.state === "interrupted" ? "已中断" : (isUp ? "上传中" : "下载中");
+    const stateLabels = { error: "传输失败", interrupted: "已中断", fetching: "等待处理", waiting_disk: "等待磁盘空间", sending: "等待发送确认", downloading: "下载中", uploading: "上传中" };
+    const stText = stateLabels[d.state] || "等待处理";
     strip = '<div class="transfer-strip ' + (failed ? "has-error" : "") + '">'
       + '<div class="head"><span class="transfer-type">' + (isUp ? ICONS.up : ICONS.down) + " 媒体组 " + (Number(d.file_index) || 1) + " / " + (Number(d.total_files) || 1) + " · " + stText + "</span><span>" + esc(d.filename || "处理中") + "</span></div>"
       + '<div class="progress"><div class="fill ' + (isUp ? "up" : "down") + '" style="width:' + pct + '%"></div></div>'
@@ -339,7 +340,8 @@ function buildTaskCard(t) {
   buttons += '<button class="btn" data-task="' + esc(t.task_id) + '" data-action="progress">' + ICONS.flag + " 断点</button>";
   buttons += '<button class="btn" data-task="' + esc(t.task_id) + '" data-action="edit">' + ICONS.edit + " 编辑</button>";
   buttons += '<button class="btn" data-task="' + esc(t.task_id) + '" data-action="' + action + '">' + ICONS[actionIcon] + " " + actionLabel + "</button>";
-  if (t.status === "running") buttons += '<button class="btn" data-task="' + esc(t.task_id) + '" data-action="stop">' + ICONS.stop + " 停止</button>";
+  buttons += '<button class="btn danger" data-task="' + esc(t.task_id) + '" data-action="cleanup-files">' + ICONS.trash + " 清理文件</button>";
+  if (t.status === "running" || t.status === "paused") buttons += '<button class="btn" data-task="' + esc(t.task_id) + '" data-action="stop">' + ICONS.stop + " 停止</button>";
   buttons += '<button class="btn danger" data-task="' + esc(t.task_id) + '" data-action="clear-dedup">' + ICONS.eraser + " 清空去重</button>";
   buttons += '<button class="btn danger" data-task="' + esc(t.task_id) + '" data-action="delete">' + ICONS.trash + " 删除</button>";
 
@@ -432,7 +434,8 @@ function renderSystem() {
     get("sidebar-uptime").textContent = "运行 " + formatUptime(system.uptime_seconds);
   }
   get("system-temp").textContent = system.temp_exists ? "可用" : "不存在";
-  get("system-temp-sub").textContent = system.temp_dir || "—";
+  const files = system.temp_files || {};
+  get("system-temp-sub").textContent = (system.temp_dir || "—") + " · " + (files.files || 0) + " 个临时文件，" + formatBytes(files.bytes || 0);
   const lowDisk = system.disk && system.disk.free < 1024 * 1024 * 1024;
   get("sidebar-health").textContent = lowDisk ? "磁盘空间偏低" : "服务正常";
   get("sidebar-health").parentElement.style.color = lowDisk ? "var(--amber)" : "var(--text)";
@@ -552,8 +555,9 @@ async function runTaskAction(taskId, action) {
   const messages = {
     "delete": ["删除任务", "任务配置、断点和去重记录都会被删除，此操作不可恢复。"],
     "clear-dedup": ["清空去重记录", "清空后将无法识别已经转发过的媒体，可能造成重复转发。"],
-    "skip-transfer": ["跳过媒体组", "断点会推进到当前媒体组的最大消息 ID，跳过其中尚未发送的内容。"],
-    "refresh-transfer": ["从断点重试", "清除当前活动传输，任务会从原有的 last_message_id 重新处理整个媒体组。"]
+    "skip-transfer": ["跳过媒体组", "跳过当前媒体组；断点只越过已完成消息，穿插的其他消息仍会处理。"],
+    "cleanup-files": ["清理任务文件", "停止此任务并删除它的临时媒体、未完成文件、封面和缩略图，保留转发断点。"],
+    "refresh-transfer": ["从断点重试", "清除当前活动传输和临时文件，任务会从原有断点重新处理未完成的媒体。"]
   };
   if (messages[action]) {
     const [title, message] = messages[action];
@@ -572,6 +576,9 @@ async function runTaskAction(taskId, action) {
     } else if (action === "skip-transfer") {
       url = "/api/tasks/" + encodeURIComponent(taskId) + "/transfer/skip";
       options = { method: "POST" };
+    } else if (action === "cleanup-files") {
+      url = "/api/tasks/" + encodeURIComponent(taskId) + "/cleanup";
+      options = { method: "POST" };
     } else if (action === "clear-dedup") {
       url = "/api/tasks/" + encodeURIComponent(taskId) + "/dedup";
       options = { method: "DELETE" };
@@ -582,7 +589,7 @@ async function runTaskAction(taskId, action) {
     const response = await apiFetch(url, options);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "操作失败");
-    showToast("操作成功");
+    showToast(action === "cleanup-files" ? "已删除 " + data.removed + " 个文件，释放 " + formatBytes(data.freed_bytes) : "操作成功");
     await refresh();
   } catch (error) {
     showToast(error.message || "操作失败");
@@ -637,6 +644,10 @@ function updateFormDependencies() {
   }
 
   const min = Number(get("task-form-min").value);
+  const hideSource = get("task-form-hide").checked;
+  if (!hideSource && (get("task-form-prefix").value || get("task-form-remove").checked || sendAs)) {
+    get("task-form-error").textContent = "显示来源时不能修改描述或以频道身份发送";
+  }
   const max = Number(get("task-form-max").value);
   const hint = get("delay-hint");
   if (min > max) {
@@ -713,6 +724,8 @@ function validateTaskForm() {
   if (Number(source) === 0 || Number(target) === 0) return "频道 ID 不能为 0，频道通常使用负数 ID";
   if (isNaN(min) || isNaN(max)) return "延迟必须是数字";
   if (min < 0 || max < 0) return "延迟不能为负数";
+  if (!get("task-form-hide").checked && (get("task-form-prefix").value || get("task-form-remove").checked || get("task-form-send-as").checked)) return "显示来源时不能修改描述或以频道身份发送";
+  if (Number(source) === Number(target)) return "源频道与目标频道不能相同";
   if (min > max) return "最小延迟不能大于最大延迟";
   return null;
 }

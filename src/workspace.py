@@ -30,6 +30,8 @@ class WorkspaceStore:
         task_key = hashlib.sha256(task_id.encode()).hexdigest()[:16]
         transfer_key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         path = self.root / ("task_" + task_key) / transfer_key
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("Workspace path must not be a symlink")
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         atomic_json(path / OWNER_FILE, {"task_id": task_id, "source": source, "message_ids": message_ids, "updated_at": time.time()})
         ACTIVE_WORKSPACES.add(path)

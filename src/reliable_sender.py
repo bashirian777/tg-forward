@@ -2,7 +2,9 @@
 import base64
 import hashlib
 import secrets
+import time
 from telethon import functions, types, utils
+from telethon.errors import RandomIdDuplicateError
 from telethon.extensions import BinaryReader, markdown
 
 
@@ -30,7 +32,8 @@ class ReliableSender:
             return True
         items = media if isinstance(media, list) else [media]
         if not intent:
-            intent = {"random_ids": [secrets.randbits(63) for _ in items], "sent": False}
+            intent = {"random_ids": [secrets.randbits(63) for _ in items], "sent": False, "message_ids": message_ids}
+            intent["updated_at"] = time.time()
             self.db.save_intent(task_id, key, intent)
         if source:
             request = functions.messages.ForwardMessagesRequest(
@@ -61,7 +64,12 @@ class ReliableSender:
                     [types.InputSingleMedia(item, random_id=random_id, message=text if i == 0 else "", entities=entities if i == 0 else [])
                      for i, (item, random_id) in enumerate(zip(prepared, intent["random_ids"]))],
                     reply_to=reply, send_as=send_peer)
-        await self.client(request)
+        try:
+            await self.client(request)
+        except RandomIdDuplicateError:
+            # This exact persisted identity was already accepted by Telegram.
+            # Never issue a new ID merely because the first response was lost.
+            pass
         intent["sent"] = True
         self.db.save_intent(task_id, key, intent)
         return True
