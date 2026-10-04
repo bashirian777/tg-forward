@@ -1,5 +1,4 @@
 """Simple web server for viewing forwarding progress."""
-import hashlib
 import hmac
 import json
 import logging
@@ -19,8 +18,9 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+from .web_assets import ASSET_TYPES, WebAssets
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-STATIC_ASSETS = {"app.css": "text/css", "app.js": "application/javascript"}
 
 
 class WebServer:
@@ -49,7 +49,7 @@ class WebServer:
         """Build the same routes for production and local HTTP tests."""
         self._app = web.Application()
         self._app.router.add_get("/", self.handle_index)
-        self._app.router.add_get("/static/{name}", self.handle_static)
+        self._app.router.add_get("/static/{name:.*}", self.handle_static)
         self._app.router.add_post("/api/auth", self.handle_api_auth)
         self._app.router.add_get("/api/status", self.handle_api_status)
         self._app.router.add_get("/api/download", self.handle_api_download)
@@ -170,11 +170,12 @@ class WebServer:
     async def handle_static(self, request):
         """Serve static assets from the whitelisted set."""
         name = request.match_info.get("name", "")
-        if name not in STATIC_ASSETS:
+        if name not in ASSET_TYPES:
             raise web.HTTPNotFound()
-        return web.FileResponse(
-            STATIC_DIR / name,
-            headers={"Content-Type": STATIC_ASSETS[name], "Cache-Control": "no-cache"},
+        return web.Response(
+            text=WebAssets(STATIC_DIR).render(name),
+            content_type=ASSET_TYPES[name],
+            headers={"Cache-Control": "no-cache"},
         )
 
     async def handle_api_status(self, request):
@@ -548,8 +549,4 @@ class WebServer:
         return web.json_response(result)
 
     def _generate_html(self):
-        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        for name in STATIC_ASSETS:
-            version = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:16]
-            html = html.replace(f"/static/{name}", f"/static/{name}?v={version}")
-        return html
+        return WebAssets(STATIC_DIR).render("index.html")

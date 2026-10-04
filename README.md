@@ -117,8 +117,10 @@ Bot 提供 `/start`、`/list`、`/add`、`/status` 和管理按钮。Web 可新�
 ```bash
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
-node --check src/static/app.js
+for file in src/static/app.js src/static/js/*.js; do node --check "$file"; done
 .venv/bin/python -m scripts.benchmark_transfer --size-mb 16 --latency-ms 20
 ```
+
+前端按视图、业务模块和公共组件拆分，无需构建；目录说明和浏览器回归方法见 [前端文档](docs/frontend.md)。
 
 模拟测速不连接 Telegram，不能当作真实提速承诺。真实测速方法见 [验证记录](docs/verification.md)，服务切换方式见 [部署说明](docs/deployment.md)。
