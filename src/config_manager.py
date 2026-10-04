@@ -1,79 +1,82 @@
-"""Configuration access with record-level optimistic concurrency."""
-import os
+"""Runtime settings and tasks, with record-level optimistic concurrency."""
 import json
 from copy import deepcopy
 from typing import Optional
 
 from .database import Database
-from .models import AppConfig, ForwardTask
-from .validators import validate_app_config, validate_task
+from .models import ForwardTask, RuntimeConfig
+from .paths import PROJECT_ROOT
+from .validators import validate_runtime_config, validate_task
 
 
 class ConfigManager:
-    def __init__(self, config_path="config/config.json", db_path=None):
-        self.config_path = config_path
-        self.db = Database(db_path or os.path.join(os.path.dirname(config_path), "forwarder.db"))
-        self._config: Optional[AppConfig] = None
+    def __init__(self, db_path="config/forwarder.db", *, database=None, create=True, project_root=PROJECT_ROOT):
+        self.db = database or Database(db_path, create=create)
+        self.project_root = project_root
+        self._config: Optional[RuntimeConfig] = None
         self._raw_app = {}
         self._raw_tasks = {}
         self._app_revision = 0
         self._task_revisions = {}
 
-    def load_config(self) -> AppConfig:
-        self.db.ensure_legacy_migration(self.config_path)
-        # Read values and revisions from the same snapshot.
+    def initialize(self, initial_password=""):
+        config = RuntimeConfig(web_password=initial_password)
+        validate_runtime_config(config, self.project_root)
+        created = self.db.initialize_settings(config.settings_dict())
+        self.load_config()
+        return created
+
+    def load_config(self) -> RuntimeConfig:
+        # Values and their revisions must come from the same snapshot.
         with self.db.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
             if not row:
-                raise FileNotFoundError(f"Config not found: {self.config_path}")
+                raise FileNotFoundError("Database is not initialized; run 'init'")
             app = json.loads(row["data"])
-            self._app_revision = row["revision"]
+            revision = row["revision"]
             tasks = db.execute("SELECT data,revision,task_id FROM tasks ORDER BY task_id").fetchall()
-            self._raw_tasks = {row["task_id"]: json.loads(row["data"]) for row in tasks}
-            self._task_revisions = {row["task_id"]: row["revision"] for row in tasks}
-        self._raw_app = deepcopy(app)
-        self._config = AppConfig.from_dict(dict(app, tasks=list(deepcopy(self._raw_tasks).values())))
-        return self._config
+            raw_tasks = {row["task_id"]: json.loads(row["data"]) for row in tasks}
+            revisions = {row["task_id"]: row["revision"] for row in tasks}
+        if set(app) - RuntimeConfig.setting_names():
+            raise ValueError("Database still contains deployment settings; run 'migrate-env'")
+        config = RuntimeConfig.from_dict(dict(app, tasks=list(raw_tasks.values())))
+        validate_runtime_config(config, self.project_root)
+        self._app_revision = revision
+        self._raw_app, self._raw_tasks = app, raw_tasks
+        self._task_revisions, self._config = revisions, config
+        return config
 
-    def save_app_config(self, config, expected_revision=None):
-        config = deepcopy(config)
-        validate_app_config(config)
-        values = dict(self._raw_app)
-        values.update(config.to_dict())
-        values.pop("tasks", None)
-        self.db.update_app_config(values, self._app_revision if expected_revision is None else expected_revision)
+    def save_app_config(self, config: RuntimeConfig, expected_revision=None):
+        if type(config) is not RuntimeConfig:
+            raise TypeError("Expected RuntimeConfig")
+        candidate = deepcopy(config)
+        validate_runtime_config(candidate, self.project_root)
+        self.db.update_app_config(candidate.settings_dict(),
+            self._app_revision if expected_revision is None else expected_revision)
         self.load_config()
 
-    def save_config(self, config):
-        """Bootstrap or save changed records; removals require explicit delete."""
-        config = deepcopy(config)
-        validate_app_config(config)
-        for task in config.tasks:
+    def save_config(self, config: RuntimeConfig):
+        """Save changed records; removing tasks requires an explicit delete."""
+        if type(config) is not RuntimeConfig:
+            raise TypeError("Expected RuntimeConfig")
+        candidate = deepcopy(config)
+        validate_runtime_config(candidate, self.project_root)
+        for task in candidate.tasks:
             validate_task(task)
-        if len({task.task_id for task in config.tasks}) != len(config.tasks):
+        if len({task.task_id for task in candidate.tasks}) != len(candidate.tasks):
             raise ValueError("Task IDs must be unique")
         if not self.db.get_app_config():
-            values = config.to_dict()
-            tasks = values.pop("tasks")
-            self.db.save_config(values, tasks)
+            self.db.save_config(candidate.settings_dict(), [task.to_dict() for task in candidate.tasks])
             self.load_config()
             return
-        # Keep detached copies because load_config refreshes the local snapshot.
-        app = config.to_dict()
-        tasks = app.pop("tasks")
-        old_app = AppConfig.from_dict(dict(self._raw_app, tasks=[])).to_dict() if self._raw_app else {}
-        old_app.pop("tasks", None)
-        revisions = dict(self._task_revisions)
-        old_tasks = deepcopy(self._raw_tasks)
-        if app != old_app:
-            self.save_app_config(config)
-        for task in tasks:
-            old = old_tasks.get(task["task_id"])
-            if old is None or ForwardTask.from_dict(dict(old)).to_dict() != task:
-                values = dict(old or {})
-                values.update(task)
-                self.db.save_task(values, revisions.get(task["task_id"], 0))
+        revisions, old_tasks = dict(self._task_revisions), deepcopy(self._raw_tasks)
+        if candidate.settings_dict() != RuntimeConfig.from_dict(self._raw_app).settings_dict():
+            self.save_app_config(candidate)
+        for task in candidate.tasks:
+            old = old_tasks.get(task.task_id)
+            if old is None or ForwardTask.from_dict(old).to_dict() != task.to_dict():
+                self.db.save_task(dict(old or {}, **task.to_dict()), revisions.get(task.task_id, 0))
         self.load_config()
 
     def get_config(self):
@@ -96,15 +99,9 @@ class ConfigManager:
         old = self._raw_tasks.get(task.task_id)
         if old is None:
             raise ValueError(f"Task {task.task_id} not found")
-        values = dict(old)
-        values.update(task.to_dict())
-        self.db.save_task(values, self._task_revisions[task.task_id] if expected_revision is None else expected_revision, source_reset)
+        self.db.save_task(dict(old, **task.to_dict()),
+            self._task_revisions[task.task_id] if expected_revision is None else expected_revision, source_reset)
         self.load_config()
 
     def get_task(self, task_id):
         return next((task for task in self._config.tasks if task.task_id == task_id), None) if self._config else None
-
-    def create_default_config(self, api_id, api_hash, phone):
-        config = AppConfig(api_id=api_id, api_hash=api_hash, phone=phone)
-        self.save_config(config)
-        return self._config

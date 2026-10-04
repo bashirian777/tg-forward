@@ -7,7 +7,7 @@ import pytest
 from src.config_manager import ConfigManager
 from src.database import ConfigurationConflict
 from src.forwarder import Forwarder
-from src.models import AppConfig, ForwardTask, ForwardResult
+from src.models import RuntimeConfig, ForwardTask, ForwardResult
 from src.progress_tracker import ProgressTracker
 from src.message_handler import MessageHandler
 from src.media_artwork import MediaArtwork
@@ -17,9 +17,9 @@ from telethon.errors import ChatForwardsRestrictedError
 
 @pytest.fixture
 def state(tmp_path):
-    cm = ConfigManager(str(tmp_path / "config.json"))
+    cm = ConfigManager(str(tmp_path / "forwarder.db"), project_root=tmp_path)
     task = ForwardTask("task", -1001111111111, -1002222222222, 0, 0)
-    cm.save_config(AppConfig(1, "test", "test", tasks=[task], temp_dir=str(tmp_path / "temp")))
+    cm.save_config(RuntimeConfig(tasks=[task], temp_dir=str(tmp_path / "temp")))
     return cm, ProgressTracker(database=cm.db), task
 
 
@@ -41,7 +41,7 @@ def test_config_operations_preserve_all_related_state(state):
 
 def test_stale_manager_cannot_delete_new_task_or_overwrite_edit(state):
     cm, _, task = state
-    other = ConfigManager(cm.config_path)
+    other = ConfigManager(cm.db.path)
     other.load_config()
     cm.add_task(replace(task, task_id="new"))
     other.update_task(replace(task, note="other"))

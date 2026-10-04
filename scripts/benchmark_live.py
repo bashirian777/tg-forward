@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 from pathlib import Path
 import resource
 import shutil
@@ -15,21 +14,11 @@ import sqlite3
 import tempfile
 import time
 
-from telethon import TelegramClient
+from src.service import create_user_client
+from src.session_guard import session_guard
+from src.startup_config import StartupConfig
+from src.paths import PROJECT_ROOT
 from src.transfer import ParallelTransfer
-
-
-def assert_session_unused(project):
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        try:
-            command = (entry / "cmdline").read_bytes().split(b"\0")
-            cwd = (entry / "cwd").resolve()
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
-            continue
-        if cwd == project and b"src.main" in command and any(x in command for x in (b"bot", b"start", b"login")):
-            raise RuntimeError("Stop the project's Telegram process before benchmarking its session")
 
 
 def sha256(path):
@@ -41,23 +30,23 @@ def sha256(path):
 
 
 async def benchmark(args):
-    project = Path.cwd().resolve()
-    assert_session_unused(project)
+    startup = StartupConfig.load(args.env_file)
     if Path(args.output).exists():
         raise ValueError("Choose a new report path; existing files will not be overwritten")
-    with sqlite3.connect("file:config/forwarder.db?mode=ro", uri=True) as conn:
-        settings = json.loads(conn.execute("SELECT data FROM app_settings WHERE id=1").fetchone()[0])
+    with sqlite3.connect(startup.db_path.as_uri() + "?mode=ro", uri=True) as conn:
         row = conn.execute("SELECT data FROM tasks WHERE task_id=?", (args.task_id,)).fetchone()
         if not row:
             raise ValueError("Task not found")
         task = json.loads(row[0])
-    client = TelegramClient("forwarder", settings["api_id"], settings["api_hash"],
-        request_retries=1, connection_retries=1, flood_sleep_threshold=0)
+    wrapper = create_user_client(startup)
     results = []
     try:
-        await client.connect()
-        if not await client.is_user_authorized():
+        await wrapper.connect()
+        client = wrapper._client
+        client.flood_sleep_threshold = 0
+        if not await wrapper.is_authorized():
             raise RuntimeError("Existing session is not authorized")
+        await wrapper.validate_account(startup.phone)
         with tempfile.TemporaryDirectory(prefix="tg-forward-benchmark-", dir=args.temp_dir) as directory:
             source = Path(directory) / "baseline.bin"
             source_hash = None
@@ -89,8 +78,8 @@ async def benchmark(args):
                         elif mode == "telethon":
                             await asyncio.wait_for(client.upload_file(str(source)), args.timeout)
                         else:
-                            await asyncio.wait_for(ParallelTransfer(client, mode, mode).upload(source,
-                                state_path=str(Path(directory) / f"upload-{mode}.json")), args.timeout)
+                            await asyncio.wait_for(ParallelTransfer(client, mode, mode).upload(source), args.timeout)
+                            Path(str(source) + ".upload.json").unlink(missing_ok=True)
                         record["ok"] = True
                     except Exception as error:
                         record.update(ok=False, error=type(error).__name__)
@@ -105,19 +94,23 @@ async def benchmark(args):
                 if mode != "telethon":
                     path.unlink()
     finally:
-        await client.disconnect()
+        await wrapper.disconnect()
         Path(args.output).write_text(json.dumps({"results": results, "scope": "raw download/upload only; no Telegram messages sent"}, indent=2) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--env-file", default=str(PROJECT_ROOT / ".env"))
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--message-id", type=int, required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--temp-dir", default=None)
     parser.add_argument("--max-size-mb", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=180)
-    asyncio.run(benchmark(parser.parse_args()))
+    args = parser.parse_args()
+    startup = StartupConfig.load(args.env_file)
+    with session_guard(startup.session_path):
+        asyncio.run(benchmark(args))
 
 
 if __name__ == "__main__":

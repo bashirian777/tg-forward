@@ -11,7 +11,7 @@ from copy import deepcopy
 from aiohttp import web
 
 from .models import ForwardTask
-from .validators import validate_task, validate_app_config
+from .validators import validate_task, validate_runtime_config
 from .database import ConfigurationConflict
 from .workspace import WorkspaceStore
 import asyncio
@@ -25,9 +25,11 @@ class WebServer:
     """Simple HTTP server for viewing task progress (read-only)."""
 
     def __init__(self, progress_tracker, task_manager, host: str = "127.0.0.1", port: int = 10082,
-                 web_password: str = ""):
+                 web_password: str = "", *, startup=None, service_status=None):
         self.progress_tracker = progress_tracker
         self.task_manager = task_manager
+        self.startup = startup
+        self.service_status = service_status
         self.host = host
         self.port = port
         self.web_password = web_password or ""
@@ -41,8 +43,8 @@ class WebServer:
         self._runner = None
         self._cleanup_task = None
 
-    async def start(self):
-        """Start the web server."""
+    def create_app(self):
+        """Build the same routes for production and local HTTP tests."""
         self._app = web.Application()
         self._app.router.add_get("/", self.handle_index)
         self._app.router.add_get("/static/{name}", self.handle_static)
@@ -68,12 +70,14 @@ class WebServer:
         self._app.router.add_post("/api/tasks/{task_id}/transfer/skip", self.handle_api_skip_transfer)
         self._app.router.add_get("/api/logs", self.handle_api_logs)
         self._app.router.add_put("/api/config", self.handle_api_update_config)
-        self._app.router.add_post("/api/config/sync-json", self.handle_api_sync_json)
-        self._app.router.add_post("/api/config/backup", self.handle_api_backup)
+        self._app.router.add_get("/api/deployment", self.handle_api_deployment)
         self._app.router.add_post("/api/cleanup", self.handle_api_cleanup)
         self._app.router.add_post("/api/tasks/{task_id}/cleanup", self.handle_api_task_cleanup)
 
-        self._runner = web.AppRunner(self._app, access_log=None)
+        return self._app
+
+    async def start(self):
+        self._runner = web.AppRunner(self.create_app(), access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()
@@ -243,7 +247,8 @@ class WebServer:
             "storage_source": "SQLite",
             "revision": self.task_manager.config_manager._app_revision,
             "web_auth_ttl_hours": config.web_auth_ttl_hours,
-            "web_port": config.web_port,
+            "web_port": self.port,
+            "web_host": self.host,
             "download_workers": config.download_workers,
             "upload_workers": config.upload_workers,
         })
@@ -483,15 +488,15 @@ class WebServer:
             if not current:
                 return web.json_response({"error": "config_unavailable"}, status=503)
             candidate = deepcopy(current)
-            allowed = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "web_password", "web_auth_ttl_hours", "web_port", "download_workers", "upload_workers"}
+            allowed = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "web_password", "web_auth_ttl_hours", "download_workers", "upload_workers"}
             if set(data) - allowed - {"revision"}:
                 raise ValueError("Unknown configuration field")
             for key in allowed & set(data):
                 if key == "web_password" and not data[key]:
                     continue
                 setattr(candidate, key, data[key])
-            validate_app_config(candidate)
-            runtime_keys = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "download_workers", "upload_workers", "web_port"}
+            validate_runtime_config(candidate, self.task_manager.config_manager.project_root)
+            runtime_keys = {"temp_dir", "temp_max_age_hours", "max_concurrent_tasks", "min_free_disk_mb", "download_workers", "upload_workers"}
             runtime_changed = any(getattr(candidate, key) != getattr(current, key) for key in runtime_keys)
             if runtime_changed and self.task_manager.has_running_tasks():
                 return web.json_response({"error": "stop_all_tasks_before_editing_config"}, status=409)
@@ -505,36 +510,18 @@ class WebServer:
             self.task_manager.config_manager.db.log_operation("update_app_config", after_data={
                 key: getattr(candidate, key) for key in runtime_keys | {"web_auth_ttl_hours"}
             })
-            return web.json_response({"success": True, "restart_required": candidate.web_port != self.port})
+            return web.json_response({"success": True})
         except ConfigurationConflict as e:
             return web.json_response({"error": str(e)}, status=409)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    async def handle_api_backup(self, request):
+    async def handle_api_deployment(self, request):
         if not self._is_authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        try:
-            output_dir = os.path.join(
-                os.path.dirname(self.task_manager.config_manager.db.path),
-                "backups", time.strftime("%Y%m%d-%H%M%S")
-            )
-            self.task_manager.config_manager.db.export_legacy(output_dir)
-            self.task_manager.config_manager.db.log_operation("export_backup", after_data={"path": output_dir})
-            return web.json_response({"success": True, "path": output_dir})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
-
-    async def handle_api_sync_json(self, request):
-        """Write the current SQLite snapshot to the legacy JSON layout."""
-        if not self._is_authorized(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
-        try:
-            config_path = self.task_manager.config_manager.config_path
-            backup_dir = self.task_manager.config_manager.db.sync_legacy(config_path)
-            return web.json_response({"success": True, "backup_dir": backup_dir})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        data = self.startup.public_info() if self.startup else {"fields": {}}
+        data["services"] = self.service_status() if self.service_status else {}
+        return web.json_response(data)
 
     async def handle_api_logs(self, request):
         if not self._is_authorized(request):

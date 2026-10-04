@@ -6,10 +6,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.custom import Button
 
-from .config_manager import ConfigManager
-from .progress_tracker import ProgressTracker
 from .task_manager import TaskManager
-from .telegram_client import TelegramClientWrapper
 from .models import ForwardTask
 from .validators import validate_channel_id, validate_delay_range
 
@@ -20,38 +17,21 @@ logger = logging.getLogger(__name__)
 class ForwarderBot:
     """Telegram Bot for managing forwarding tasks via commands and buttons."""
 
-    def __init__(self, bot_token: str, admin_ids: list,
-                 config_manager: ConfigManager,
-                 progress_tracker: ProgressTracker,
-                 user_client: TelegramClientWrapper):
-        self.bot_token = bot_token
-        self.admin_ids = admin_ids
-        self.config_manager = config_manager
-        self.progress_tracker = progress_tracker
-        self.user_client = user_client
-        
+    def __init__(self, startup, task_manager: TaskManager):
+        self.startup = startup
+        self.bot_token = startup.bot_token
+        self.admin_ids = startup.admin_ids
+        self.config_manager = task_manager.config_manager
+        self.progress_tracker = task_manager.progress_tracker
+        self._task_manager = task_manager
         self._bot: Optional[TelegramClient] = None
-        self._task_manager: Optional[TaskManager] = None
         self._pending_tasks = {}  # user_id -> task being created
 
     async def start(self) -> None:
         """Start the bot."""
-        config = self.config_manager.get_config()
-        self._bot = TelegramClient(
-            StringSession(),
-            config.api_id,
-            config.api_hash
-        )
-        
+        self._bot = TelegramClient(StringSession(), self.startup.api_id,
+            self.startup.api_hash, proxy=self.startup.proxy)
         await self._bot.start(bot_token=self.bot_token)
-        
-        self._task_manager = TaskManager(
-            self.user_client,
-            self.config_manager,
-            self.progress_tracker,
-            temp_dir=getattr(config, 'temp_dir', 'temp') or 'temp'
-        )
-        
         self._register_handlers()
         logger.info("Bot started")
 
@@ -616,7 +596,5 @@ class ForwarderBot:
         await self._bot.run_until_disconnected()
 
     async def stop(self) -> None:
-        if self._task_manager:
-            await self._task_manager.stop_all_tasks()
         if self._bot:
             await self._bot.disconnect()

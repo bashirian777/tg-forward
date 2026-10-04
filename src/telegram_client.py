@@ -38,6 +38,10 @@ def _media_filename(attributes, fallback: str) -> str:
     return fallback
 
 
+class TelegramSessionError(ValueError):
+    """An expected login/account problem with a safe operator-facing message."""
+
+
 class TelegramClientWrapper:
     """Wrapper around Telethon client for Telegram operations."""
 
@@ -51,6 +55,7 @@ class TelegramClientWrapper:
         self._progress_tracker = None  # Will be set externally
         self.download_workers = 4
         self.upload_workers = 4
+        self.connection_status = {"state": "disconnected", "message": "Telegram 尚未连接"}
 
     def set_progress_tracker(self, tracker):
         """Set progress tracker for download/upload progress updates."""
@@ -86,6 +91,21 @@ class TelegramClientWrapper:
         if self._client is None:
             return False
         return await self._client.is_user_authorized()
+
+    async def logout(self):
+        if self._client:
+            await self._client.log_out()
+            self._client = None
+
+    async def validate_account(self, phone):
+        """Never silently reuse a session belonging to another configured phone."""
+        me = await self._client.get_me()
+        if not me or str(getattr(me, "phone", "")).lstrip("+") != phone.lstrip("+"):
+            raise TelegramSessionError("Telegram 会话与 TG_PHONE 不一致，请停止服务后执行 login --relogin")
+
+    async def ensure_ready(self):
+        if self.connection_status["state"] != "ready" or not self._client or not self._client.is_connected():
+            raise ValueError(self.connection_status["message"] if self.connection_status["state"] != "ready" else "Telegram 连接已断开，请稍后再试")
 
     async def login(self, phone: str, code: Optional[str] = None,
                     password: Optional[str] = None) -> bool:

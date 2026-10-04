@@ -52,18 +52,13 @@ class TaskProgress:
 
 
 @dataclass
-class AppConfig:
-    api_id: int
-    api_hash: str
-    phone: str
-    bot_token: str = ""
-    admin_ids: List[int] = field(default_factory=list)
+class RuntimeConfig:
+    """Mutable settings persisted in SQLite; deployment credentials live elsewhere."""
     tasks: List[ForwardTask] = field(default_factory=list)
     temp_dir: str = "temp"
     temp_max_age_hours: float = 24.0
     web_password: str = ""
     web_auth_ttl_hours: float = 24.0
-    web_port: int = 10082
     max_concurrent_tasks: int = 1
     min_free_disk_mb: int = 1024
     download_workers: int = 4
@@ -71,6 +66,13 @@ class AppConfig:
 
     def to_dict(self):
         return asdict(self)
+
+    def settings_dict(self):
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "tasks"}
+
+    @classmethod
+    def setting_names(cls):
+        return {f.name for f in fields(cls) if f.name != "tasks"}
 
     @classmethod
     def from_dict(cls, data):

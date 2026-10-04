@@ -57,7 +57,7 @@ let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
 const AUTH_EXPIRY_KEY = "tg_forwarder_web_expiry";
 let authExpiresAt = Number(localStorage.getItem(AUTH_EXPIRY_KEY)) || 0;
 let refreshTimer = null;
-const state = { tasks: [], system: null, config: null, logs: [] };
+const state = { tasks: [], system: null, config: null, deployment: null, logs: [] };
 let taskFilter = "all";
 let taskSearch = "";
 
@@ -452,6 +452,18 @@ function renderConfig() {
   get("config-auth-ttl").textContent = c.web_auth_ttl_hours + " 小时";
   get("auth-expiry").textContent = authExpiresAt ? "本次登录到期：" + new Date(authExpiresAt * 1000).toLocaleString() : "未启用登录有效期";
 }
+function renderDeployment() {
+  const deployment = state.deployment;
+  if (!deployment) return;
+  const sources = { environment: "系统环境变量", ".env": ".env", default: "默认值" };
+  const labels = { TG_API_ID: "API ID", TG_API_HASH: "API Hash", TG_PHONE: "手机号", TG_BOT_TOKEN: "Bot token", TG_ADMIN_IDS: "管理员 ID", TG_PROXY_URL: "Telegram 代理", DB_PATH: "数据库", SESSION_PATH: "登录会话", WEB_HOST: "监听地址", WEB_PORT: "监听端口" };
+  const services = Object.entries(deployment.services || {}).map(([name, status]) => '<div class="config-item"><span class="k">' + (name === "telegram" ? "Telegram" : "Bot") + '</span><span class="v">' + esc(status.message) + '</span></div>');
+  const fields = Object.entries(deployment.fields || {}).map(([name, field]) => {
+    const value = "value" in field ? (Array.isArray(field.value) ? field.value.join(", ") || "未设置" : field.value) : field.configured ? "已配置" : "未配置";
+    return '<div class="config-item"><span class="k">' + esc(labels[name] || name) + '</span><span class="v">' + esc(value) + '</span><span class="sub">来源：' + esc(sources[field.source] || field.source) + '</span></div>';
+  });
+  get("deployment-panel").innerHTML = services.join("") + fields.join("") + '<div class="config-item"><span class="sub">修改 .env 后重启生效；Telegram 登录使用命令行 login</span></div>';
+}
 let logsSig = "";
 function renderLogs() {
   const logs = state.logs || [];
@@ -483,7 +495,8 @@ async function refresh() {
     ["任务", "/api/tasks"],
     ["系统资源", "/api/system"],
     ["运行配置", "/api/config"],
-    ["操作日志", "/api/logs?limit=20"]
+    ["操作日志", "/api/logs?limit=20"],
+    ["启动配置", "/api/deployment"]
   ];
   try {
     const results = await Promise.allSettled(requests.map(([, url]) => apiFetch(url)));
@@ -497,7 +510,10 @@ async function refresh() {
         continue;
       }
       if (!result.value.ok) {
-        failed.push(requests[i][0] + "接口返回 HTTP " + result.value.status);
+        // Older running instances serve these assets before their next restart.
+        if (!(requests[i][1] === "/api/deployment" && result.value.status === 404)) {
+          failed.push(requests[i][0] + "接口返回 HTTP " + result.value.status);
+        }
         payloads.push(null);
         continue;
       }
@@ -513,10 +529,11 @@ async function refresh() {
     if (payloads[1] !== null) state.system = payloads[1];
     if (payloads[2] !== null) state.config = payloads[2];
     if (payloads[3] !== null) state.logs = Array.isArray(payloads[3]) ? payloads[3] : [];
+    if (payloads[4] !== null) state.deployment = payloads[4];
 
     const sections = [
       ["任务", renderStats], ["任务列表", renderTasks],
-      ["系统资源", renderSystem], ["运行配置", renderConfig], ["操作日志", renderLogs]
+      ["系统资源", renderSystem], ["运行配置", renderConfig], ["启动配置", renderDeployment], ["操作日志", renderLogs]
     ];
     for (const [name, render] of sections) {
       try {
@@ -737,28 +754,6 @@ get("edit-config-btn").addEventListener("click", openConfigModal);
   get(id).addEventListener("change", updateFormDependencies);
 });
 
-async function syncDatabaseToJson() {
-  const ok = await askConfirm(
-    "同步数据库到 JSON",
-    "将当前 SQLite 数据写入 config.json、progress.json、progress_download.json 和去重文件。同步前会自动备份现有 JSON。",
-    false
-  );
-  if (!ok) return;
-  const button = get("sync-json-btn");
-  setBusy(button, true);
-  try {
-    const response = await apiFetch("/api/config/sync-json", { method: "POST" });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "同步 JSON 失败");
-    showToast("数据库已同步到 JSON，并已备份旧文件");
-  } catch (error) {
-    showToast(error.message || "同步 JSON 失败");
-  } finally {
-    setBusy(button, false);
-  }
-}
-get("sync-json-btn").addEventListener("click", syncDatabaseToJson);
-
 get("task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const error = get("task-form-error");
@@ -939,7 +934,6 @@ async function openConfigModal() {
   get("config-form-mindisk").value = c.min_free_disk_mb || 0;
   get("config-form-cleanup").value = c.temp_max_age_hours || 0;
   get("config-form-ttl").value = c.web_auth_ttl_hours;
-  get("config-form-port").value = c.web_port;
   get("config-form-download").value = c.download_workers;
   get("config-form-upload").value = c.upload_workers;
   editingConfigRevision = c.revision;
@@ -960,7 +954,6 @@ get("config-form").addEventListener("submit", async (event) => {
     min_free_disk_mb: Number(get("config-form-mindisk").value),
     temp_max_age_hours: Number(get("config-form-cleanup").value),
     web_auth_ttl_hours: Number(get("config-form-ttl").value),
-    web_port: Number(get("config-form-port").value),
     download_workers: Number(get("config-form-download").value),
     upload_workers: Number(get("config-form-upload").value),
     revision: editingConfigRevision
@@ -975,7 +968,7 @@ get("config-form").addEventListener("submit", async (event) => {
     if (data.error === "stop_all_tasks_before_editing_config") throw new Error("还有任务在运行，请先停止全部任务再修改传输参数");
     if (!response.ok) throw new Error(data.error || "保存配置失败");
     closeModal("config-modal");
-    showToast(data.restart_required ? "配置已保存，Web 端口需重启服务生效" : "配置已保存");
+    showToast("配置已保存");
     await refresh();
   } catch (e) {
     error.textContent = e.message || "保存失败";

@@ -22,9 +22,12 @@ env/
 *.session-journal
 *.session-wal
 *.session-shm
+*.session.lock
 
-# Config files with sensitive data
-config/config.json
+# Deployment credentials
+.env
+.env.*
+!.env.example
 
 # Temp files
 temp/*
@@ -32,12 +35,6 @@ temp/*
 
 # Runtime state and generated backups
 config/forwarder.db*
-config/legacy-backups/
-config/json-backups/
-config/.json-sync/
-config/backups/
-config/progress*.json
-config/dedup_*.json
 bot.pid
 nohup.out
 logs/

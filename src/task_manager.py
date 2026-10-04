@@ -82,6 +82,8 @@ class TaskManager:
         if not task_config.enabled:
             raise ValueError("Enable the task before starting it")
 
+        await self.client.ensure_ready()
+
         # Create forwarder for this task with its own dedup tracker
         dedup_tracker = None
         if task_config.deduplicate:

@@ -1,8 +1,5 @@
 """Progress and live transfer state backed by SQLite."""
 import asyncio
-import json
-import os
-import shutil
 import time
 from typing import Dict, Optional
 
@@ -13,9 +10,7 @@ from .models import TaskProgress
 class ProgressTracker:
     """Tracks durable checkpoints and live transfer telemetry."""
 
-    def __init__(self, progress_path: str = "config/progress.json", database: Database = None):
-        self.progress_path = progress_path
-        db_path = os.path.join(os.path.dirname(progress_path), "forwarder.db")
+    def __init__(self, db_path: str = "config/forwarder.db", database: Database = None):
         self.db = database or Database(db_path)
         self._progress: Dict[str, TaskProgress] = {}
         self._download_progress: Dict[str, dict] = {}

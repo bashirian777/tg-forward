@@ -16,7 +16,7 @@ from tests.test_integrity import state
 
 def manager(state):
     cm, tracker, _ = state
-    return TaskManager(SimpleNamespace(set_progress_tracker=Mock()), cm, tracker, temp_dir=cm.get_config().temp_dir)
+    return TaskManager(SimpleNamespace(set_progress_tracker=Mock(), ensure_ready=AsyncMock()), cm, tracker, temp_dir=cm.get_config().temp_dir)
 
 
 @pytest.mark.asyncio

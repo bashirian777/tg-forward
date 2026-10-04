@@ -13,10 +13,9 @@ logger = logging.getLogger(__name__)
 class DedupTracker:
     """Tracks forwarded media IDs in the shared database."""
 
-    def __init__(self, task_id: str, storage_dir: str = "config",
-                 save_interval: int = 50, database: Database = None):
+    def __init__(self, task_id: str, db_path: str = "config/forwarder.db", database: Database = None):
         self.task_id = task_id
-        self.db = database or Database(f"{storage_dir}/forwarder.db")
+        self.db = database or Database(db_path)
         self._file_ids = self.db.dedup_ids(task_id)
 
     def _get_file_unique_id(self, message: Message) -> Optional[str]:

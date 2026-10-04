@@ -1,13 +1,13 @@
 """SQLite storage for configuration, progress, transfers, and dedup records."""
 import json
 import os
-import shutil
 import sqlite3
-import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, Iterable, Optional
+
+from .models import RuntimeConfig
+from .paths import project_path
 
 
 class ConfigurationConflict(ValueError):
@@ -17,8 +17,10 @@ class ConfigurationConflict(ValueError):
 class Database:
     """Small transactional SQLite repository used by all application layers."""
 
-    def __init__(self, path: str = "config/forwarder.db"):
-        self.path = os.path.abspath(path)
+    def __init__(self, path: str = "config/forwarder.db", *, create=True):
+        self.path = str(project_path(path))
+        if not create and not os.path.isfile(self.path):
+            raise FileNotFoundError("Database not found; run 'init' or check DB_PATH")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._initialize()
 
@@ -149,124 +151,26 @@ class Database:
             row = db.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else None
 
-    def migration_info(self) -> Optional[dict]:
-        value = self.get_metadata("legacy_imported")
-        return json.loads(value) if value else None
-
-    def ensure_legacy_migration(self, config_path: str = "config/config.json") -> bool:
-        """Import legacy JSON only into an empty database, then preserve a backup."""
-        if self.get_metadata("legacy_imported"):
-            return False
-        if not os.path.exists(config_path):
-            return False
-
-        # A database created or changed by the current application is already
-        # authoritative, even if it predates the migration marker. Never let
-        # an old JSON file overwrite data changed through Web or CLI.
-        with self.connection() as db:
-            has_data = any(
-                db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-                for table in ("app_settings", "tasks", "task_progress", "active_transfers", "dedup_records")
-            )
-            if has_data:
-                now = self._now()
-                db.execute(
-                    "INSERT OR IGNORE INTO metadata(key, value) VALUES('legacy_imported', ?)",
-                    (json.dumps({"at": now, "source": "existing_database"}, ensure_ascii=False),),
-                )
-                return False
-
-        config_dir = os.path.dirname(os.path.abspath(config_path))
-        progress_path = os.path.join(config_dir, "progress.json")
-        download_path = os.path.join(config_dir, "progress_download.json")
-        with open(config_path, "r", encoding="utf-8") as handle:
-            config_data = json.load(handle)
-
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_dir = os.path.join(config_dir, "legacy-backups", stamp)
-        os.makedirs(backup_dir, mode=0o700, exist_ok=True)
-        for source in (config_path, progress_path, download_path):
-            if os.path.exists(source):
-                shutil.copy2(source, os.path.join(backup_dir, os.path.basename(source)))
-        for source in Path(config_dir).glob("dedup_*.json"):
-            shutil.copy2(source, os.path.join(backup_dir, source.name))
-
-        tasks = config_data.get("tasks", [])
-        progress_data = self._read_json(progress_path, {})
-        transfer_data = self._read_json(download_path, {})
-        now = self._now()
-
-        with self.connection() as db:
-            db.execute(
-                "INSERT OR REPLACE INTO app_settings(id, data, updated_at) VALUES(1, ?, ?)",
-                (json.dumps({key: value for key, value in config_data.items() if key != "tasks"}, ensure_ascii=False), now),
-            )
-            db.execute(
-                "INSERT INTO config_snapshots(created_at, reason, data) VALUES(?, ?, ?)",
-                (now, "legacy_migration", json.dumps(config_data, ensure_ascii=False)),
-            )
-            for task in tasks:
-                task_id = str(task["task_id"])
-                db.execute(
-                    "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
-                    "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
-                    (task_id, json.dumps(task, ensure_ascii=False), now),
-                )
-
-            # Preserve progress even if a legacy file contains a task removed
-            # from config; create a disabled placeholder for manual recovery.
-            for task_id, progress in progress_data.items():
-                if not db.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone():
-                    placeholder = {
-                        "task_id": task_id, "source_channel": -1,
-                        "target_channel": -1, "min_delay": 10.0,
-                        "max_delay": 20.0, "enabled": False,
-                        "note": "迁移保留的孤立进度"
-                    }
-                    db.execute(
-                        "INSERT OR IGNORE INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?)",
-                        (task_id, json.dumps(placeholder, ensure_ascii=False), now),
-                    )
-                db.execute(
-                    "INSERT OR REPLACE INTO task_progress(task_id, last_message_id, last_forward_time, forwarded_count, updated_at) VALUES(?, ?, ?, ?, ?)",
-                    (task_id, int(progress.get("last_message_id", 0)), str(progress.get("last_forward_time", "")), int(progress.get("forwarded_count", 0)), now),
-                )
-
-            for task_id, transfer in transfer_data.items():
-                snapshot = dict(transfer)
-                snapshot["state"] = "interrupted"
-                snapshot["legacy_state"] = transfer.get("type", "unknown")
-                if not db.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone():
-                    continue
-                db.execute(
-                    "INSERT OR REPLACE INTO active_transfers(task_id, data, updated_at) VALUES(?, ?, ?)",
-                    (task_id, json.dumps(snapshot, ensure_ascii=False), now),
-                )
-
-            for source in Path(config_dir).glob("dedup_*.json"):
-                task_id = source.stem[len("dedup_"):]
-                if not db.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone():
-                    continue
-                values = self._read_json(str(source), {}).get("file_unique_ids", [])
-                db.executemany(
-                    "INSERT OR IGNORE INTO dedup_records(task_id, file_unique_id, created_at) VALUES(?, ?, ?)",
-                    [(task_id, str(value), now) for value in values],
-                )
-            db.execute(
-                "INSERT INTO metadata(key, value) VALUES('legacy_imported', ?)",
-                (json.dumps({"at": now, "backup_dir": backup_dir}, ensure_ascii=False),),
-            )
-        return True
-
     @staticmethod
-    def _read_json(path: str, default):
-        if not os.path.exists(path):
-            return default
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return default
+    def _validate_settings(data):
+        if set(data) - RuntimeConfig.setting_names():
+            raise ValueError("Only runtime settings may be saved in SQLite")
+
+    def initialize_settings(self, data):
+        """Insert defaults only once, including under concurrent initialization."""
+        self._validate_settings(data)
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute("INSERT OR IGNORE INTO app_settings(id,data,updated_at) VALUES(1,?,?)",
+                (json.dumps(data, ensure_ascii=False), self._now()))
+            return cursor.rowcount == 1
+
+    def verify(self):
+        with self.connection() as db:
+            checks = [row[0] for row in db.execute("PRAGMA integrity_check")]
+            foreign_keys = [tuple(row) for row in db.execute("PRAGMA foreign_key_check")]
+        return {"ok": checks == ["ok"] and not foreign_keys,
+            "integrity": checks, "foreign_key_errors": foreign_keys}
 
     def get_app_config(self) -> Optional[dict]:
         with self.connection() as db:
@@ -291,6 +195,7 @@ class Database:
         return actual
 
     def update_app_config(self, data: dict, expected_revision=None) -> None:
+        self._validate_settings(data)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_revision(db, "app_settings", 1, expected_revision)
@@ -331,7 +236,8 @@ class Database:
                            (data["task_id"], source_reset["last_message_id"], self._now()))
 
     def save_config(self, app_data: dict, tasks: Iterable[dict]) -> None:
-        """Bootstrap/import a snapshot without deleting absent tasks or child rows."""
+        """Save a runtime snapshot without deleting absent tasks or child rows."""
+        self._validate_settings(app_data)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             now = self._now()
@@ -559,99 +465,3 @@ class Database:
         limit = max(1, min(int(limit), 500))
         with self.connection() as db:
             return [dict(row) for row in db.execute("SELECT * FROM operation_logs ORDER BY id DESC LIMIT ?", (limit,))]
-
-    def sync_legacy(self, config_path: str = "config/config.json") -> str:
-        """Synchronize the authoritative SQLite state into legacy JSON files."""
-        config_path = os.path.abspath(config_path)
-        config_dir = os.path.dirname(config_path)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_root = os.path.join(config_dir, "json-backups")
-        backup_dir = os.path.join(backup_root, stamp)
-        suffix = 1
-        while os.path.exists(backup_dir):
-            backup_dir = os.path.join(backup_root, f"{stamp}-{suffix}")
-            suffix += 1
-        export_dir = os.path.join(config_dir, ".json-sync", os.path.basename(backup_dir))
-        os.makedirs(backup_dir, mode=0o700, exist_ok=True)
-        os.makedirs(export_dir, mode=0o700, exist_ok=True)
-
-        legacy_files = [
-            config_path,
-            os.path.join(config_dir, "progress.json"),
-            os.path.join(config_dir, "progress_download.json"),
-        ]
-        legacy_files.extend(str(path) for path in Path(config_dir).glob("dedup_*.json"))
-        for source in legacy_files:
-            if os.path.exists(source):
-                shutil.copy2(source, os.path.join(backup_dir, os.path.basename(source)))
-
-        self.export_legacy(export_dir)
-        output_files = {"config.json", "progress.json", "progress_download.json"}
-        output_files.update(path.name for path in Path(export_dir).glob("dedup_*.json"))
-        staged = []
-        try:
-            for name in output_files:
-                target = config_path if name == "config.json" else os.path.join(config_dir, name)
-                temporary = target + f".sync-{os.getpid()}.tmp"
-                shutil.copy2(os.path.join(export_dir, name), temporary)
-                staged.append((temporary, target))
-            for temporary, target in staged:
-                os.replace(temporary, target)
-            for source in Path(config_dir).glob("dedup_*.json"):
-                if source.name not in output_files:
-                    source.unlink()
-        finally:
-            for temporary, _ in staged:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
-            shutil.rmtree(export_dir, ignore_errors=True)
-        self.log_operation(
-            "sync_json", after_data={"config_path": config_path, "backup_dir": backup_dir}
-        )
-        return backup_dir
-
-    def verify_legacy(self, config_path: str = "config/config.json") -> dict:
-        """Compare legacy config/progress with the imported database values."""
-        source = self._read_json(config_path, {})
-        source_tasks = {str(item["task_id"]): item for item in source.get("tasks", [])}
-        database_tasks = {str(item["task_id"]): item for item in self.list_tasks()}
-        source_progress = self._read_json(os.path.join(os.path.dirname(config_path), "progress.json"), {})
-        database_progress = self.list_progress()
-        task_checks = {task_id: database_tasks.get(task_id) == item for task_id, item in source_tasks.items()}
-        progress_checks = {}
-        for task_id, item in source_progress.items():
-            actual = database_progress.get(task_id, {})
-            progress_checks[task_id] = all([
-                int(actual.get("last_message_id", -1)) == int(item.get("last_message_id", 0)),
-                int(actual.get("forwarded_count", -1)) == int(item.get("forwarded_count", 0)),
-                actual.get("last_forward_time", "") == item.get("last_forward_time", ""),
-            ])
-        return {
-            "tasks_source": len(source_tasks), "tasks_database": len(database_tasks),
-            "progress_source": len(source_progress), "progress_database": len(database_progress),
-            "task_checks": task_checks, "progress_checks": progress_checks,
-            "all_tasks_match": set(source_tasks) == set(database_tasks) and all(task_checks.values()),
-            "all_progress_match": all(progress_checks.values()),
-            "migration": self.migration_info(),
-        }
-
-    def export_legacy(self, output_dir: str) -> None:
-        """Export a database snapshot in the old JSON layout."""
-        os.makedirs(output_dir, mode=0o700, exist_ok=True)
-        app_data = self.get_app_config() or {}
-        app_data["tasks"] = self.list_tasks()
-        with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as handle:
-            json.dump(app_data, handle, ensure_ascii=False, indent=2)
-        progress = {}
-        for task_id, item in self.list_progress().items():
-            progress[task_id] = {key: item.get(key, default) for key, default in [
-                ("task_id", task_id), ("last_message_id", 0),
-                ("last_forward_time", ""), ("forwarded_count", 0)
-            ]}
-        with open(os.path.join(output_dir, "progress.json"), "w", encoding="utf-8") as handle:
-            json.dump(progress, handle, ensure_ascii=False, indent=2)
-        with open(os.path.join(output_dir, "progress_download.json"), "w", encoding="utf-8") as handle:
-            json.dump(self.list_transfers(), handle, ensure_ascii=False, indent=2)
-        for task in self.list_tasks():
-            with open(os.path.join(output_dir, f"dedup_{task['task_id']}.json"), "w", encoding="utf-8") as handle:
-                json.dump({"file_unique_ids": sorted(self.dedup_ids(task["task_id"]))}, handle, ensure_ascii=False, indent=2)
