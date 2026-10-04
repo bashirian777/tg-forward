@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-LOG_DIR="$ROOT_DIR/logs"
-PID_FILE="$ROOT_DIR/bot.pid"
+LOG_DIR="$ROOT_DIR/data/logs"
+PID_FILE="$ROOT_DIR/data/run/forwarder.pid"
 cd "$ROOT_DIR"
 
 # Validate the new configuration before stopping a healthy service.
@@ -72,15 +72,15 @@ then
     "$PYTHON" -m src.main migrate-env --db "$FORWARDER_DB"
 fi
 
-mkdir -p "$LOG_DIR"
-nohup "$PYTHON" -m src.main serve >>"$LOG_DIR/bot.log" 2>&1 < /dev/null &
+mkdir -p "$LOG_DIR" "$(dirname "$PID_FILE")"
+nohup "$PYTHON" -m src.main serve >>"$LOG_DIR/forwarder.log" 2>&1 < /dev/null &
 BOT_PID=$!
 printf '%s\n' "$BOT_PID" > "$PID_FILE"
 sleep 2
 if kill -0 "$BOT_PID" 2>/dev/null; then
-    printf 'Service started. PID: %s\nLog: %s\n' "$BOT_PID" "$LOG_DIR/bot.log"
+    printf 'Service started. PID: %s\nLog: %s\n' "$BOT_PID" "$LOG_DIR/forwarder.log"
 else
-    printf '%s\n' 'Service exited during startup; inspect logs/bot.log.' >&2
+    printf 'Service exited during startup; inspect %s.\n' "$LOG_DIR/forwarder.log" >&2
     rm -f "$PID_FILE"
     exit 1
 fi

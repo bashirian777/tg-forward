@@ -16,6 +16,7 @@ from telethon.errors import (
 from .media_artwork import MediaArtwork, artwork_sizes, normalize_artwork
 from .errors import is_permanent_error, PermanentTransferError
 from .database import Database
+from .paths import DEFAULT_SESSION_PATH, PROJECT_ROOT
 from .reliable_sender import ReliableSender, encode_media, decode_media
 from .transfer import ParallelTransfer
 from .workspace import atomic_json, OWNER_FILE
@@ -45,7 +46,7 @@ class TelegramSessionError(ValueError):
 class TelegramClientWrapper:
     """Wrapper around Telethon client for Telegram operations."""
 
-    def __init__(self, api_id: int, api_hash: str, session_name: str = "forwarder",
+    def __init__(self, api_id: int, api_hash: str, session_name: str = str(PROJECT_ROOT / DEFAULT_SESSION_PATH),
                  proxy: dict = None):
         self.api_id = api_id
         self.api_hash = api_hash
@@ -71,6 +72,7 @@ class TelegramClientWrapper:
             if self.proxy:
                 kwargs["proxy"] = self.proxy
 
+            Path(self.session_name).parent.mkdir(parents=True, exist_ok=True)
             self._client = TelegramClient(
                 self.session_name,
                 self.api_id,

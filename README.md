@@ -27,6 +27,17 @@ chmod 600 .env
 
 服务启动后任务默认停止，由管理员手动启动。登录／转发／测速进程使用同一个会话锁，避免同时占用 Telegram 会话。CLI 删除任务需先停止服务；服务运行时通过 Web 或 Bot 删除。
 
+运行文件集中在 `data/`，目录会自动创建，且不提交 Git：
+
+```text
+data/
+├── sessions/                       # Telegram 用户会话、会话锁及 SQLite 附属文件
+├── run/forwarder.pid                # restart.sh 管理的服务进程
+└── logs/forwarder.log               # 后台启动与运行日志
+```
+
+Bot 使用内存会话，不生成新的 Bot session 文件。已有根目录会话的安装需要先停止服务，将会话及 `-journal`／`-wal`／`-shm`／`.lock` 附属文件一起移动到新目录，再修改 `.env` 的 `SESSION_PATH`；不要仅修改路径，否则会创建新会话并要求重新登录。具体步骤见 [部署说明](docs/deployment.md#整理旧运行文件)。
+
 ## 配置归属
 
 每项设置只有一个来源，启动参数与运行设置使用不同模型和保存接口。
@@ -36,7 +47,7 @@ chmod 600 .env
 | `TG_API_ID`、`TG_API_HASH`、`TG_PHONE` | 必填，Telegram 用户账号 |
 | `TG_BOT_TOKEN`、`TG_ADMIN_IDS` | 可选，配置 token 时必须指定管理员 |
 | `DB_PATH` | `config/forwarder.db` |
-| `SESSION_PATH` | `forwarder.session` |
+| `SESSION_PATH` | `data/sessions/forwarder.session` |
 | `WEB_HOST`、`WEB_PORT` | `127.0.0.1`、`10082` |
 | `TG_PROXY_URL` | 可选，支持 `socks5://`、`socks4://`、`http://` |
 | `WEB_INITIAL_PASSWORD` | 仅第一次 `init` 使用，已有数据库时忽略 |

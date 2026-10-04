@@ -10,12 +10,12 @@ from urllib.parse import unquote, urlsplit
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 
-from .paths import PROJECT_ROOT, project_path
+from .paths import DEFAULT_SESSION_PATH, PROJECT_ROOT, project_path
 
 DEFAULTS = {
     "TG_API_ID": "", "TG_API_HASH": "", "TG_PHONE": "",
     "TG_BOT_TOKEN": "", "TG_ADMIN_IDS": "", "TG_PROXY_URL": "",
-    "DB_PATH": "config/forwarder.db", "SESSION_PATH": "forwarder.session",
+    "DB_PATH": "config/forwarder.db", "SESSION_PATH": str(DEFAULT_SESSION_PATH),
     "WEB_HOST": "127.0.0.1", "WEB_PORT": "10082", "WEB_INITIAL_PASSWORD": "",
 }
 
@@ -49,7 +49,7 @@ class StartupConfig:
     bot_token: str = field(default="", repr=False)
     admin_ids: Tuple[int, ...] = ()
     db_path: Path = PROJECT_ROOT / "config/forwarder.db"
-    session_path: Path = PROJECT_ROOT / "forwarder.session"
+    session_path: Path = PROJECT_ROOT / DEFAULT_SESSION_PATH
     web_host: str = "127.0.0.1"
     web_port: int = 10082
     proxy_url: str = field(default="", repr=False)

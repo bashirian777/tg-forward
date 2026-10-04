@@ -15,7 +15,7 @@ from .models import ForwardTask
 from .paths import PROJECT_ROOT, project_path
 from .progress_tracker import ProgressTracker
 from .service import ForwarderService, connect_user, create_user_client
-from .session_guard import session_guard
+from .session_guard import project_processes, session_guard
 from .startup_config import StartupConfig, StartupConfigurationError
 from .task_manager import TaskManager
 from .temp_cleaner import cleanup_temp_dir
@@ -113,19 +113,21 @@ def migrate_environment(args):
         prepare_env(db_path, env_file)
         print(f"Environment file prepared at {env_file}; database unchanged")
         return
-    with session_guard(project_path("forwarder.session")):
-        with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as existing:
-            row = existing.execute("SELECT data FROM app_settings WHERE id=1").fetchone()
-        if row and not DEPLOYMENT_KEYS & json.loads(row[0]).keys():
-            startup = StartupConfig.load(env_file)
-            if startup.db_path != db_path:
-                raise StartupConfigurationError("DB_PATH must match the migration source database")
+    with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as existing:
+        row = existing.execute("SELECT data FROM app_settings WHERE id=1").fetchone()
+    already_migrated = row and not DEPLOYMENT_KEYS & json.loads(row[0]).keys()
+    digest = None
+    if not already_migrated:
+        if any(project_processes({"bot", "serve", "start", "login"})):
+            raise ValueError("The project's Telegram service is running; stop it before migrating")
+        digest = prepare_env(db_path, env_file)
+    startup = StartupConfig.load(env_file)
+    if startup.db_path != db_path:
+        raise StartupConfigurationError("DB_PATH must match the migration source database")
+    with session_guard(startup.session_path):
+        if already_migrated:
             print("Deployment settings already migrated; existing .env and SQLite preserved")
             return
-        digest = prepare_env(db_path, env_file)
-        startup = StartupConfig.load(env_file)
-        if startup.db_path != db_path:
-            raise StartupConfigurationError("DB_PATH must match the migration source database")
         db = Database(db_path, create=False)
         remove_deployment_fields(db, digest)
         print(f"Deployment settings migrated to {env_file}; task and runtime state retained")

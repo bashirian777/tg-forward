@@ -1,5 +1,6 @@
 """Environment precedence, SQLite ownership, initialization and service lifecycle."""
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -48,6 +49,7 @@ def test_env_precedence_paths_and_literal_password(tmp_path, monkeypatch):
     assert config.sources["TG_API_HASH"] == ".env"
     assert config.sources["DB_PATH"] == "default"
     assert config.db_path == tmp_path / "config/forwarder.db"
+    assert config.session_path == tmp_path / "data/sessions/forwarder.session"
     assert config.initial_password == "中文 # '$HOME ${TG_PHONE}"
     assert config.api_hash not in repr(config) and config.phone not in repr(config)
     public = json.dumps(config.public_info())
@@ -160,7 +162,9 @@ def test_migration_preserves_state_and_removes_stale_credential_copies(tmp_path)
     db = legacy_database(tmp_path)
     path = tmp_path / ".env"
     digest = prepare_env(db.path, path, project_root=tmp_path, environ={})
-    assert StartupConfig.load(path, environ={}, project_root=tmp_path).api_id == 12345
+    migrated = StartupConfig.load(path, environ={}, project_root=tmp_path)
+    assert migrated.api_id == 12345
+    assert migrated.session_path == tmp_path / "forwarder.session"  # Existing installations keep their original session.
     assert path.stat().st_mode & 0o777 == 0o600
     assert "api_hash" in db.get_app_config()  # prepare is read-only for SQLite
     assert remove_deployment_fields(db, digest)
@@ -306,11 +310,52 @@ async def test_mismatched_phone_cannot_reuse_existing_session(tmp_path):
     await client.validate_account("+12345678901")
 
 
+@pytest.mark.asyncio
+async def test_nested_session_directory_is_created_before_telethon(tmp_path, monkeypatch):
+    config = startup(tmp_path)
+    client = TelegramClientWrapper(config.api_id, config.api_hash, session_name=str(config.session_path))
+    telegram = AsyncMock()
+    telegram.is_connected = Mock(return_value=True)
+    def create_telegram(path, *args, **kwargs):
+        assert path == str(config.session_path)
+        assert Path(path).parent.is_dir()
+        return telegram
+    monkeypatch.setattr("src.telegram_client.TelegramClient", create_telegram)
+    assert not config.session_path.parent.exists()
+    assert await client.connect()
+    await client.disconnect()
+    telegram.connect.assert_awaited_once()
+    telegram.disconnect.assert_awaited_once()
+
+
 def test_session_guard_prevents_parallel_use(tmp_path):
     with session_guard(tmp_path / "session", project_root=tmp_path):
         with pytest.raises(ValueError, match="in use"):
             with session_guard(tmp_path / "session", project_root=tmp_path):
                 pytest.fail("Session lock was not exclusive")
+
+
+@pytest.mark.asyncio
+async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, monkeypatch):
+    db_path = tmp_path / "config/forwarder.db"
+    cm = ConfigManager(db_path, create=True, project_root=tmp_path)
+    cm.initialize("保留密码")
+    expected = tmp_path / "data/sessions/forwarder.session"
+    env = env_file(tmp_path, DB_PATH=str(db_path), SESSION_PATH=str(expected))
+    monkeypatch.setattr("src.startup_config.os.environ", {})
+    captured = []
+    @contextmanager
+    def isolated_guard(path):
+        captured.append(path)
+        with session_guard(path, project_root=tmp_path):
+            yield
+    monkeypatch.setattr("src.main.session_guard", isolated_guard)
+    before = cm.db.get_app_config()
+    await main(["--env-file", str(env), "migrate-env", "--db", str(db_path)])
+    assert captured == [expected]
+    assert Path(str(expected) + ".lock").exists()
+    assert not (tmp_path / "forwarder.session.lock").exists()
+    assert cm.db.get_app_config() == before
 
 
 def test_removed_json_commands_are_rejected():
