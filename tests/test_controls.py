@@ -19,6 +19,15 @@ def manager(state):
 
 
 @pytest.mark.asyncio
+async def test_fallback_chain_limit_follows_media_group_setting(state):
+    mgr = manager(state)
+    limit = mgr.config_manager.get_config().max_concurrent_tasks
+    assert mgr.client.disk_semaphore._value == limit
+    await mgr.update_settings({"max_concurrent_tasks": limit + 1})
+    assert mgr.client.disk_semaphore._value == limit + 1
+
+
+@pytest.mark.asyncio
 async def test_resume_stopped_task_rejected(state):
     mgr = manager(state)
     with pytest.raises(ValueError):
