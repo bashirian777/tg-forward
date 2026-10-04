@@ -10,7 +10,7 @@ Python 3.9 或更新版本，推荐 Python 3.12。
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 # 开发测试
-.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pip install -e '.[dev]'
 ```
 
 从 https://my.telegram.org 获取 API ID／Hash，从 @BotFather 获取管理 Bot 的 token。首次初始化：
