@@ -3,8 +3,7 @@ import asyncio
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
-from telethon import types, functions
-from src.transfer import ParallelTransfer, PART_SIZE, load_manifest
+from tg_forwarder.telegram.transfer import ParallelTransfer, PART_SIZE, load_manifest
 
 
 class Stream:

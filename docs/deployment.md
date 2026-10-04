@@ -1,51 +1,101 @@
-# 部署与配置迁移
+# 部署与升级
 
-启动参数由 `.env` 或系统环境管理，运行设置和任务由 SQLite 管理。迁移工具、初始化和重启脚本都不自动创建压缩归档或历史备份。
+生产服务运行一个 Python 进程。Waitress 在 `WEB_HOST:WEB_PORT` 提供 Flask API 与 Vue dist，后台线程持有一个长期 asyncio 循环，Telegram 用户客户端、Bot 和任务状态由它管理。不要为同一数据库 / Telegram 会话启动多个 Web worker 或服务副本。
 
-## 已有服务升级
+## 安装与运行
 
-1. 使用当前虚拟环境安装 `requirements.txt` 中的依赖。
-2. 执行 `.venv/bin/python -m src.main migrate-env --db config/forwarder.db --prepare`，或用 `--db` 指定旧数据库的实际位置。这一步读取现有 SQLite 并准备权限为 600 的 `.env`，不修改运行数据库，不占用 Telegram 会话。准备完成后，迁移命令默认读取环境或 `.env` 中的 `DB_PATH`。
-3. 检查启动参数。若已有 `.env` 与旧凭据冲突，工具会列出冲突变量名并保留原文件；先处理冲突再迁移。
-4. 执行 `bash restart.sh`。脚本先校验配置，再向本项目服务发送 SIGTERM，等待任务和 worker 完成取消；旧进程未退出时中止，不强制杀死，不启动第二个实例。
-5. 服务停止后，脚本完成一次性数据库配置迁移，保留任务、断点、错误、去重和当前 Web 密码。新进程使用 `serve`，默认所有任务停止。
-6. 重新登录后台，检查连接状态、启动参数来源和实际临时路径，再手动启动任务。
+源码安装按 README 安装 Python 依赖并执行 `scripts.build_release --frontend-only`。已有 wheel 自带 dist，安装后直接运行 `tg-forward`。源码构建需要 Node，生产运行不需要。
 
-手动切换时，先停止项目服务，再执行 `migrate-env` 和 `serve`。`bot` 保留为 `serve` 的别名。以上操作仅针对转发项目，和 PI WEB 的 session daemon 无关。
+默认绑定 `127.0.0.1:10082`。手动启动：
 
-## 配置生效规则
+```bash
+.venv/bin/tg-forward init
+.venv/bin/tg-forward login
+.venv/bin/tg-forward serve
+```
 
-- 系统环境变量优先于 `.env`，空值也视为明确设置；后台显示变量来源，不回显敏感值。
-- API 凭据、手机号、Bot、管理员、代理、数据库／会话路径、Web 地址／端口修改后重启。
-- `WEB_INITIAL_PASSWORD` 只在首次 `init` 创建运行设置时使用。以后密码与登录有效期由后台管理。
-- 相对路径统一以项目目录解析。数据库路径不正确时启动报错，避免误建空配置。
-- 改手机号后不会继续使用旧账号；会话手机号不匹配时停止启动任务。停止服务后执行 `login --relogin`。
-- 服务未登录或 Telegram／Bot 连接失败时，Web 仍可访问并显示处理方式。
+`init` 只初始化一次，重复运行保留已有数据。`login --relogin` 用于明确切换账号，须先停止服务。`bot` 是 `serve` 的兼容别名。Telegram 尚未登录、网络失败或 Bot 配置错误时，后台仍能查看连接状态和修改配置；启动转发返回明确的不可用状态。
 
-## 数据与回退边界
+源码安装可使用 `bash restart.sh`：先校验配置，再发送 SIGTERM 并等待旧转发服务退出，随后完成需要的迁移并启动新服务。旧进程未退出时脚本停止，不强制杀死。此脚本只管理本项目的转发进程。
 
-迁移只清理旧部署字段及其历史配置副本，不修改任务、断点、媒体文件或 Telegram 用户会话。代码可以通过 Git 回退，但迁移前版本从数据库读取 API 凭据；直接回退旧代码后需从 `.env` 恢复其所需配置。优先在新的配置模型上修复问题，避免重新引入两份权威配置。
+默认数据位于 `data/`，临时文件位于 `temp/`。源码安装以项目目录为基准；wheel 以启动工作目录为基准。自定义绝对路径可避免服务管理器工作目录变化影响数据源。`--env-file` 只选择环境文件，不改变路径基准。
 
-SQLite 的 `-wal`、`-shm` 文件由数据库自行管理。运行时若人工复制数据库，应使用 SQLite backup API 获得一致副本，不能只复制活动主数据库文件。
+## systemd 示例
+
+以下示例假定虚拟环境与 `.env` 位于 `/opt/tg-forward`，运行用户 `tg-forward` 已拥有数据和临时目录。
+
+```ini
+[Unit]
+Description=Telegram Forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tg-forward
+WorkingDirectory=/opt/tg-forward
+ExecStart=/opt/tg-forward/.venv/bin/tg-forward serve
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=90
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+
+使用 systemd 时由 journal 收集控制台日志。不要同时用 systemd 与 `restart.sh` 管理同一个实例。所有任务在服务启动后默认停止，需要管理员启动。
+
+## HTTPS 反向代理
+
+本机访问或 SSH 隧道保留默认设置。Nginx 终止 HTTPS 时，在 `.env` 设置 `WEB_TRUSTED_PROXY=127.0.0.1`，并将请求代理到本机 Waitress。该设置只接受一个明确的代理 IP，默认不信任转发头。
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:10082;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_read_timeout 30s;
+}
+```
+
+此处假定反向代理与 Python 位于同一主机、应用部署在域名根路径。可信代理提供 HTTPS 协议时，登录 Cookie 带 `Secure`；所有登录 Cookie 均为 HttpOnly、SameSite Strict。写请求使用 CSRF token，服务检查 Origin 与 Host。修改 `WEB_TRUSTED_PROXY` 后重启。不要添加 `*` 或信任任意客户端传来的转发头。
+
+## 已有安装升级
+
+1. 先构建新版本的 dist / wheel，并准备好新依赖；暂停或停止转发任务，正常退出旧服务。
+2. 保留已有 `.env`、`DB_PATH` 数据库、`SESSION_PATH` 用户会话以及尚需续传的临时目录，安装新包。可在旧服务运行时执行下面的 `--prepare`，它只准备 `.env`。
+3. 仅对 SQLite 仍包含 API 凭据等部署字段的旧安装执行 `migrate-env`。已经拆分环境配置的安装跳过此步骤。
+4. 执行 `verify-db` 和 `serve`。第一次加载配置自动将旧明文管理密码改成带盐哈希，清理旧配置、快照和操作记录中的密码字段，不改变当前登录密码、任务或断点。
+5. 重新登录 Web，检查来源 / 目标、连接状态、实际数据和临时路径；任务默认停止，核对后手动启动。
+
+```bash
+# 仅旧配置仍包含部署字段时需要；路径按实际旧安装替换
+.venv/bin/tg-forward migrate-env --db config/forwarder.db --prepare
+# 正常停止旧服务后完成迁移
+.venv/bin/tg-forward migrate-env
+.venv/bin/tg-forward verify-db
+.venv/bin/tg-forward serve
+```
+
+`migrate-env` 默认读取环境或 `.env` 中的 `DB_PATH`，尚无 `.env` 时使用 `--db` 指定旧数据库。已有配置冲突只报告变量名称，保留原文件；重复执行完成后的迁移保留现状。指定缺失或未初始化的数据库时，普通启动不会悄悄创建空数据库。
+
+迁移保留任务、断点、去重、错误、发送意图、传输状态及 Telegram 用户会话。新认证使用 Cookie，旧 localStorage Bearer token 会被前端清除，升级后重新登录。
+
+密码哈希迁移不能直接回退至要求明文密码的旧 Web 实现。若需回退，应使用升级前的一致数据库副本配合对应代码。使用 SQLite backup API 或停止全部写入后执行 checkpoint 来准备一致副本，不能只复制活动数据库的主文件。升级工具本身不自动创建备份或压缩归档。
 
 ## 整理旧运行文件
 
-新安装的默认数据库路径为 `data/forwarder.db`，用户会话路径为 `data/sessions/forwarder.session`，`restart.sh` 的 PID 与日志分别写入 `data/run/forwarder.pid` 和 `data/logs/forwarder.log`。路径以安装目录为基准，所需目录自动创建。
+保留当前 `.env` 的自定义路径即可，不必移动。若要统一到默认 `data/`：
 
-已有安装的 `.env` 路径会继续生效，脚本不会擅自移动正在使用的会话。迁移旧运行文件时：
-
-1. 先停止转发服务及使用同一会话的登录／测速进程，等待正常退出。
-2. 创建 `data`。对当前 `DB_PATH` 指向的数据库执行 `PRAGMA wal_checkpoint(TRUNCATE)`，确认没有繁忙连接，再关闭数据库连接；将主数据库及仍存在的 `-wal`、`-shm`、`-journal` 文件移至 `data/forwarder.db` 对应位置，目标已有文件时停止。更新 `.env` 的 `DB_PATH=data/forwarder.db`，核对 SQLite 完整性、外键与所有表数据。旧 `config/` 只剩空占位文件时，删除占位文件和空目录。
-3. 创建 `data/sessions`、`data/run`、`data/logs`，将当前 `SESSION_PATH` 指向的用户会话和存在的 `-journal`、`-wal`、`-shm`、`.lock` 文件一起移动到会话目录；目标已有文件时停止，避免覆盖另一份登录状态。
-4. 更新 `.env` 的 `SESSION_PATH=data/sessions/forwarder.session`。如系统环境变量也设置了 `DB_PATH` 或 `SESSION_PATH`，应同步修改，因为它优先于 `.env`。
-5. 将旧 `logs/bot.log` 移至 `data/logs/forwarder.log`。历史 `nohup.out` 可移至 `data/logs/nohup.out`，旧 `bot.pid` 可移至 `data/run/forwarder.pid`；重启会更新 PID。
-6. 旧版留下的 `bot_session.session` 及其附属文件可移入 `data/sessions`。当前 Bot 使用内存会话，不读取或生成这份文件。
-7. 执行 `bash restart.sh`，检查 Web 的 Telegram／Bot 连接状态，再手动启动任务。
-
-这里只移动现有文件，不生成备份或归档。运行设置和用户会话应保留原有内容。自定义的 `DB_PATH` 与 `SESSION_PATH` 仍然支持，不要求放在默认目录。
+1. 停止转发、登录及测速进程，等待正常退出。
+2. 对旧数据库执行 `PRAGMA wal_checkpoint(TRUNCATE)`，确认没有繁忙连接，关闭连接后移动数据库及仍存在的 `-wal`、`-shm`、`-journal` 附属文件。更新 `DB_PATH`，核对完整性和各表数据；目标已有文件时停止。
+3. 将用户会话及 `-journal`、`-wal`、`-shm`、`.lock` 附属文件一起移动到 `data/sessions`，更新 `SESSION_PATH`，避免创建另一份空会话。
+4. 如系统环境同时设置这些路径，也同步修改；系统环境优先于 `.env`。
+5. 旧日志 / PID 可移至 `data/logs`、`data/run`。当前 Bot 使用内存会话，不再读取旧 Bot session。
 
 ## 现场验收
 
-- 首次安装、重复初始化、后台修改密码后重启、系统环境变量覆盖 `.env`。
-- Telegram 实际账号一致性、Bot token、代理及目标发送权限。
-- 同一代表性文件的 1／4／8 worker 吞吐量、CPU、磁盘及 FloodWait。
+本仓库自动测试使用临时数据库和模拟 Telegram，不代替真实账号验收。上线前检查用户手机号、来源和目标权限、论坛话题、Bot 管理员及代理；选代表性媒体验证转发、相册、停止与续传。吞吐量测量方法见[验证记录](verification.md)。

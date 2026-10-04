@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
-from telethon import functions, types, utils
+from telethon import functions, types
 from telethon.errors import FileReferenceExpiredError
 
-from src.media_artwork import MediaArtwork, normalize_artwork
-from src.message_handler import MessageHandler
-from src.telegram_client import TelegramClientWrapper
-from src.temp_cleaner import cleanup_temp_dir
+from tg_forwarder.telegram.artwork import MediaArtwork, normalize_artwork
+from tg_forwarder.forwarding.handler import MessageHandler
+from tg_forwarder.telegram.client import TelegramClientWrapper
+from tg_forwarder.runtime.cleanup import cleanup_temp_dir
 
 
 def jpeg(width=640, height=480):
@@ -251,7 +251,7 @@ async def test_handlers_cache_artwork_before_download_and_clean_every_exit(tmp_p
 
 def test_startup_cleanup_also_removes_stale_thumbnails_and_covers(tmp_path):
     import time
-    from src.workspace import WorkspaceStore, OWNER_FILE, atomic_json
+    from tg_forwarder.storage.workspace import WorkspaceStore, OWNER_FILE, atomic_json
     store = WorkspaceStore(tmp_path)
     path = store.open("task", -100123, [1])
     for name in ("video.mp4", "thumb_task.jpg", "cover_task.jpg"):

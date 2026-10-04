@@ -1,0 +1,1 @@
+"""Flask management Blueprints."""

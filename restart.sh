@@ -11,10 +11,10 @@ cd "$ROOT_DIR"
 FORWARDER_DB="$("$PYTHON" -B - <<'PY'
 import json
 import sqlite3
-from src.config_migration import DEPLOYMENT_KEYS, prepare_env
-from src.models import RuntimeConfig
-from src.startup_config import StartupConfig
-from src.validators import validate_runtime_config
+from tg_forwarder.config.migration import DEPLOYMENT_KEYS, prepare_env
+from tg_forwarder.config.models import RuntimeConfig
+from tg_forwarder.config.startup import StartupConfig
+from tg_forwarder.config.validation import validate_runtime_config
 config = StartupConfig.load()
 with sqlite3.connect(config.db_path.as_uri() + '?mode=ro', uri=True) as db:
     row = db.execute('SELECT data FROM app_settings WHERE id=1').fetchone()
@@ -32,7 +32,7 @@ OLD_PIDS=()
 while read -r pid; do
     OLD_PIDS+=("$pid")
 done < <("$PYTHON" -B - <<'PY'
-from src.session_guard import project_processes
+from tg_forwarder.telegram.session_guard import project_processes
 for pid in project_processes({'bot', 'serve'}):
     print(pid)
 PY
@@ -63,17 +63,17 @@ if "$PYTHON" -B - "$FORWARDER_DB" <<'PY'
 import json
 import sqlite3
 import sys
-from src.config_migration import DEPLOYMENT_KEYS
+from tg_forwarder.config.migration import DEPLOYMENT_KEYS
 with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as db:
     data = json.loads(db.execute('SELECT data FROM app_settings WHERE id=1').fetchone()[0])
 sys.exit(0 if DEPLOYMENT_KEYS & data.keys() else 1)
 PY
 then
-    "$PYTHON" -m src.main migrate-env --db "$FORWARDER_DB"
+    "$ROOT_DIR/.venv/bin/tg-forward" migrate-env --db "$FORWARDER_DB"
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$PID_FILE")"
-nohup "$PYTHON" -m src.main serve >>"$LOG_DIR/forwarder.log" 2>&1 < /dev/null &
+nohup "$ROOT_DIR/.venv/bin/tg-forward" serve >>"$LOG_DIR/forwarder.log" 2>&1 < /dev/null &
 BOT_PID=$!
 printf '%s\n' "$BOT_PID" > "$PID_FILE"
 sleep 2

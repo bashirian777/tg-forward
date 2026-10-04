@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 import pytest
 from telethon import types
 
-from src.transfer import ParallelTransfer
-from src.telegram_client import _safe_name
+from tg_forwarder.telegram.transfer import ParallelTransfer
+from tg_forwarder.telegram.client import _safe_name
 from tests.test_integrity import state
 from tests.test_media_artwork import video, wrapper
 

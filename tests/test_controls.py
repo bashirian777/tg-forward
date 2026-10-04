@@ -6,11 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 import pytest
 from telethon import types
-from src.forwarder import Forwarder
-from src.task_manager import TaskManager
-from src.web_server import WebServer
-from src.reliable_sender import ReliableSender
-from src.validators import validate_task
+from tg_forwarder.forwarding.engine import Forwarder
+from tg_forwarder.tasks.manager import TaskManager
+from tg_forwarder.telegram.sender import ReliableSender
+from tg_forwarder.tasks.validation import validate_task
 from tests.test_integrity import state
 
 
@@ -55,9 +54,8 @@ async def test_invalid_configuration_does_not_change_memory_or_db(state):
     mgr = manager(state)
     cm = mgr.config_manager
     before = deepcopy(cm.get_config().to_dict())
-    server = WebServer(mgr.progress_tracker, mgr)
-    request = SimpleNamespace(json=AsyncMock(return_value={"temp_dir": "/tmp/changed", "max_concurrent_tasks": "wrong"}))
-    assert (await server.handle_api_update_config(request)).status == 400
+    with pytest.raises(ValueError):
+        await mgr.update_settings({"temp_dir": "/tmp/changed", "max_concurrent_tasks": "wrong"})
     assert cm.get_config().to_dict() == before
     assert cm.db.get_app_config()["temp_dir"] == before["temp_dir"]
 

@@ -3,14 +3,11 @@ import json
 import sqlite3
 from unittest.mock import AsyncMock
 from dataclasses import replace
-from aiohttp.test_utils import TestClient, TestServer
-from aiohttp import web
 import pytest
-from src.database import Database
-from src.web_server import WebServer
-from src.message_handler import MessageHandler
-from src.validators import validate_task
-from tests.test_controls import manager
+from tg_forwarder.storage.database import Database
+from tests.http_support import http_client, login
+from tg_forwarder.forwarding.handler import MessageHandler
+from tg_forwarder.tasks.validation import validate_task
 from tests.test_integrity import state
 from tests.test_media_artwork import wrapper
 
@@ -27,29 +24,20 @@ def test_old_sqlite_schema_migrates_and_preserves_checkpoint(tmp_path):
     assert db.get_progress("old")["last_message_id"] == 123
 
 
-@pytest.mark.asyncio
-async def test_http_auth_config_and_conflict(state):
-    mgr = manager(state)
-    server = WebServer(mgr.progress_tracker, mgr, web_password="密码")
-    app = web.Application()
-    app.router.add_post("/api/auth", server.handle_api_auth)
-    app.router.add_get("/api/config", server.handle_api_config)
-    app.router.add_put("/api/config", server.handle_api_update_config)
-    async with TestClient(TestServer(app)) as client:
-        assert (await client.get("/api/config")).status == 401
-        auth = await (await client.post("/api/auth", json={"password": "密码"})).json()
-        headers = {"Authorization": "Bearer " + auth["token"]}
-        config = await (await client.get("/api/config", headers=headers)).json()
+def test_http_auth_config_and_conflict(state, tmp_path):
+    with http_client(state, tmp_path, password="密码") as (client, runtime):
+        assert client.get("/api/config").status_code == 401
+        headers = login(client, "密码")
+        config = client.get("/api/config").json
         assert config["web_auth_ttl_hours"] == 24
-        response = await client.put("/api/config", headers=headers, json={"revision": config["revision"], "web_auth_ttl_hours": 2})
-        assert response.status == 200
-        response = await client.put("/api/config", headers=headers, json={"revision": config["revision"], "web_auth_ttl_hours": 1})
-        assert response.status == 409
-        assert mgr.config_manager.get_config().web_auth_ttl_hours == 2
-        response = await client.put("/api/config", headers=headers, json={"web_password": "新密码"})
-        assert response.status == 200
-        assert (await client.get("/api/config", headers=headers)).status == 401
-        assert not WebServer(mgr.progress_tracker, mgr, web_password="新密码")._is_authorized(type("Req", (), {"headers": headers})())
+        assert client.put("/api/config", headers=headers, json={"revision": config["revision"], "web_auth_ttl_hours": 2}).status_code == 200
+        assert client.put("/api/config", headers=headers, json={"revision": config["revision"], "web_auth_ttl_hours": 1}).status_code == 409
+        assert client.put("/api/config", json={"web_auth_ttl_hours": 1}).status_code == 403
+        assert client.put("/api/config", headers=headers, json={"web_password": "新密码"}).status_code == 200
+        assert client.get("/api/config").status_code == 401
+        login(client, "新密码")
+        assert client.get("/api/config").status_code == 200
+
 
 
 def test_complete_hashtag_matching_preserves_larger_tags(tmp_path):
@@ -80,7 +68,7 @@ async def test_show_source_uses_native_forward(state, tmp_path):
 async def test_expired_document_refreshes_same_media(state, tmp_path, monkeypatch):
     from telethon.errors import FileReferenceExpiredError
     from tests.test_media_artwork import video
-    from src.transfer import ParallelTransfer
+    from tg_forwarder.telegram.transfer import ParallelTransfer
     client = wrapper()
     client.set_progress_tracker(state[1])
     original, fresh = video(), video(reference=b"fresh")
@@ -95,8 +83,8 @@ async def test_expired_document_refreshes_same_media(state, tmp_path, monkeypatc
 async def test_deleted_document_during_reference_refresh_requires_operator(state, tmp_path, monkeypatch):
     from telethon.errors import FileReferenceExpiredError
     from tests.test_media_artwork import video
-    from src.errors import PermanentTransferError
-    from src.transfer import ParallelTransfer
+    from tg_forwarder.forwarding.errors import PermanentTransferError
+    from tg_forwarder.telegram.transfer import ParallelTransfer
     client = wrapper()
     client.set_progress_tracker(state[1])
     client._client.get_messages.return_value = None
@@ -107,23 +95,17 @@ async def test_deleted_document_during_reference_refresh_requires_operator(state
     assert download.await_count == 1
 
 
-@pytest.mark.asyncio
-async def test_page_asset_urls_change_when_scripts_change(state, tmp_path, monkeypatch):
-    import re
-    monkeypatch.setattr("src.web_server.STATIC_DIR", tmp_path)
-    (tmp_path / "index.html").write_text('<link href="/static/app.css"><script src="/static/app.js" defer></script>')
-    (tmp_path / "app.css").write_text("body { color: black; }")
-    (tmp_path / "app.js").write_text("console.log('old');")
-    mgr = manager(state)
-    server = WebServer(mgr.progress_tracker, mgr)
-    async with TestClient(TestServer(server.create_app())) as client:
-        response = await client.get("/")
-        assert response.headers["Cache-Control"] == "no-store"
-        before = re.findall(r'/static/[^"<>]+', await response.text())
-        assert len(before) == 2 and all("?v=" in url for url in before)
-        (tmp_path / "app.js").write_text("console.log('new');")
-        after = re.findall(r'/static/[^"<>]+', await (await client.get("/")).text())
-        assert before[0] == after[0]
-        assert before[1] != after[1]
-        assert await (await client.get(after[1])).text() == "console.log('new');"
-        assert (await client.get("/static/missing.js")).status == 404
+def test_static_spa_and_api_paths_are_distinct(state, tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text('<script type="module" src="/assets/app-hash.js"></script>')
+    (dist / "assets/app-hash.js").write_text("console.log('built')")
+    with http_client(state, tmp_path, dist_dir=dist) as (client, runtime):
+        for route in ("/", "/tasks", "/settings", "/resources", "/activity"):
+            response = client.get(route)
+            assert response.status_code == 200
+            assert response.headers["Cache-Control"] == "no-store"
+        asset = client.get("/assets/app-hash.js")
+        assert "immutable" in asset.headers["Cache-Control"]
+        for route in ("/api/missing", "/assets/missing.js", "/.env", "/assets/../../.env"):
+            assert client.get(route).status_code == 404

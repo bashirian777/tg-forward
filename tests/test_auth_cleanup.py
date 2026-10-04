@@ -1,18 +1,15 @@
 """Authentication lifetime and owned file cleanup checks."""
-import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
-from src.web_server import WebServer
-from src.workspace import WorkspaceStore
+from tg_forwarder.web.auth import AuthSessions
+from tg_forwarder.storage.workspace import WorkspaceStore
 from tests.test_controls import manager
 from tests.test_media_artwork import video, wrapper
 from telethon import types
 from telethon.errors import ChatForwardsRestrictedError
-from src.media_artwork import MediaArtwork
-from src.message_handler import MessageHandler
-from src.workspace import OWNER_FILE, atomic_json
+from tg_forwarder.telegram.artwork import MediaArtwork
+from tg_forwarder.forwarding.handler import MessageHandler
 from tests.test_integrity import state
 
 
@@ -91,32 +88,32 @@ async def test_owned_failure_and_cancel_keep_files_until_explicit_cleanup(state,
 
 @pytest.mark.asyncio
 async def test_unicode_password_and_fixed_expiry(state, monkeypatch):
+    from dataclasses import replace
     mgr = manager(state)
-    server = WebServer(mgr.progress_tracker, mgr, web_password="管理密码")
+    mgr.config_manager.save_app_config(replace(mgr.config_manager.get_config(), web_password="管理密码", web_auth_ttl_hours=30 / 3600))
+    auth = AuthSessions(mgr.config_manager.get_config)
     clock = [1000.0]
-    monkeypatch.setattr("src.web_server.time.time", lambda: clock[0])
-    server._auth_token_ttl = 30
-    response = await server.handle_api_auth(SimpleNamespace(json=AsyncMock(return_value={"password": "管理密码"})))
-    data = json.loads(response.body)
+    monkeypatch.setattr("tg_forwarder.web.auth.time.time", lambda: clock[0])
+    data = auth.login("管理密码", "local")
     assert data["expires_at"] == 1030
-    request = SimpleNamespace(headers={"Authorization": "Bearer " + data["token"]})
     clock[0] = 1029
-    assert server._is_authorized(request)
-    assert server._auth_tokens[data["token"]] == 1030
+    auth.authorize(data["token"])
+    assert auth.info(data["token"])["expires_at"] == 1030
     clock[0] = 1030
-    assert not server._is_authorized(request)
+    with pytest.raises(ValueError):
+        auth.authorize(data["token"])
 
 
 @pytest.mark.asyncio
 async def test_auth_lifetime_hot_update_persists_and_preserves_existing_token(state):
     mgr = manager(state)
     mgr.has_running_tasks = lambda: True
-    server = WebServer(mgr.progress_tracker, mgr)
-    server._auth_tokens["old"] = 9999999999
-    response = await server.handle_api_update_config(SimpleNamespace(json=AsyncMock(return_value={"web_auth_ttl_hours": 0.5})))
-    assert response.status == 200
-    assert server._auth_token_ttl == 1800
-    assert server._auth_tokens["old"] == 9999999999
+    auth = AuthSessions(mgr.config_manager.get_config)
+    old = auth.login("", "local")
+    await mgr.update_settings({"web_auth_ttl_hours": 0.5})
+    assert auth.info(old["token"])["expires_at"] == old["expires_at"]
+    new = auth.login("", "local")
+    assert new["expires_at"] - __import__("time").time() <= 1800
     mgr.config_manager.load_config()
     assert mgr.config_manager.get_config().web_auth_ttl_hours == 0.5
 
@@ -152,3 +149,32 @@ async def test_task_cleanup_includes_covers_and_does_not_touch_other_tasks(state
     result = await mgr.cleanup_task_files("task")
     assert result["removed"] == 2
     assert not own.exists() and other.exists()
+
+
+def test_cookie_csrf_password_rotation_and_logout(state, tmp_path):
+    from tests.http_support import http_client, login
+    with http_client(state, tmp_path, password="旧密码") as (client, runtime):
+        assert client.get("/api/tasks").status_code == 401
+        response = client.post("/api/auth", json={"password": "旧密码"})
+        assert response.status_code == 200
+        assert "HttpOnly" in response.headers["Set-Cookie"]
+        assert "SameSite=Strict" in response.headers["Set-Cookie"]
+        headers = {"X-CSRF-Token": response.json["csrf_token"]}
+        public = client.get("/api/config")
+        assert "web_password" not in public.json
+        assert client.put("/api/config", json={"web_auth_ttl_hours": 1}).status_code == 403
+        assert client.put("/api/config", headers=headers, json={"web_password": None}).status_code == 400
+        assert client.put("/api/config", headers=headers, json={"web_password": "新密码"}).status_code == 200
+        assert client.get("/api/tasks").status_code == 401
+        assert client.post("/api/auth", json={"password": "旧密码"}).status_code == 401
+        headers = login(client, "新密码")
+        assert client.delete("/api/auth", headers=headers).status_code == 200
+        assert client.get("/api/tasks").status_code == 401
+
+
+def test_login_rate_limit_blocks_repeated_wrong_passwords(state, tmp_path):
+    from tests.http_support import http_client
+    with http_client(state, tmp_path, password="管理密码") as (client, runtime):
+        for _ in range(10):
+            assert client.post("/api/auth", json={"password": "错误"}).status_code == 401
+        assert client.post("/api/auth", json={"password": "错误"}).status_code == 429

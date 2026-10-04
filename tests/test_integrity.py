@@ -4,13 +4,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 
-from src.config_manager import ConfigManager
-from src.database import ConfigurationConflict
-from src.forwarder import Forwarder
-from src.models import RuntimeConfig, ForwardTask, ForwardResult
-from src.progress_tracker import ProgressTracker
-from src.message_handler import MessageHandler
-from src.media_artwork import MediaArtwork
+from tg_forwarder.storage.config_store import ConfigManager
+from tg_forwarder.storage.database import ConfigurationConflict
+from tg_forwarder.forwarding.engine import Forwarder
+from tg_forwarder.tasks.models import ForwardTask, ForwardResult
+from tg_forwarder.config.models import RuntimeConfig
+from tg_forwarder.storage.progress_store import ProgressTracker
+from tg_forwarder.forwarding.handler import MessageHandler
+from tg_forwarder.telegram.artwork import MediaArtwork
 from tests.test_media_artwork import video, wrapper
 from telethon.errors import ChatForwardsRestrictedError
 

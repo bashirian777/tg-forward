@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from src.transfer import ParallelTransfer, PART_SIZE
+from tg_forwarder.telegram.transfer import ParallelTransfer, PART_SIZE
 
 
 class Stream:

@@ -14,11 +14,11 @@ import sqlite3
 import tempfile
 import time
 
-from src.service import create_user_client
-from src.session_guard import session_guard
-from src.startup_config import StartupConfig
-from src.paths import PROJECT_ROOT
-from src.transfer import ParallelTransfer
+from tg_forwarder.runtime.service import create_user_client
+from tg_forwarder.telegram.session_guard import session_guard
+from tg_forwarder.config.startup import StartupConfig
+from tg_forwarder.config.paths import PROJECT_ROOT
+from tg_forwarder.telegram.transfer import ParallelTransfer
 
 
 def sha256(path):

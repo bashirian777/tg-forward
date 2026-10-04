@@ -4,26 +4,24 @@ from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
-import sqlite3
 from unittest.mock import AsyncMock, Mock
 
-from aiohttp.test_utils import TestClient, TestServer
+from tg_forwarder.storage.passwords import verify_password
+from tg_forwarder.runtime.bridge import RuntimeBridge
+from tg_forwarder.web.app import create_app
 import pytest
 
-from src.config_manager import ConfigManager
-from src.config_migration import prepare_env, remove_deployment_fields
-from src.database import Database
-from src.main import create_parser, main
-from src.models import RuntimeConfig
-from src.paths import DEFAULT_DB_PATH, project_path
-from src.progress_tracker import ProgressTracker
-from src.dedup_tracker import DedupTracker
-from src.service import ForwarderService
-from src.session_guard import session_guard
-from src.startup_config import StartupConfig, StartupConfigurationError
-from src.telegram_client import TelegramClientWrapper
-from src.web_server import WebServer
-from tests.test_controls import manager
+from tg_forwarder.storage.config_store import ConfigManager
+from tg_forwarder.config.migration import prepare_env, remove_deployment_fields
+from tg_forwarder.storage.database import Database
+from tg_forwarder.cli import create_parser, main
+from tg_forwarder.config.paths import DEFAULT_DB_PATH, project_path
+from tg_forwarder.storage.progress_store import ProgressTracker
+from tg_forwarder.storage.dedup_store import DedupTracker
+from tg_forwarder.runtime.service import ForwarderService
+from tg_forwarder.telegram.session_guard import session_guard
+from tg_forwarder.config.startup import StartupConfig, StartupConfigurationError
+from tg_forwarder.telegram.client import TelegramClientWrapper
 from tests.test_integrity import state
 
 VALUES = {"TG_API_ID": "12345", "TG_API_HASH": "a" * 32, "TG_PHONE": "+12345678901"}
@@ -119,7 +117,7 @@ def test_repeated_init_and_restart_preserve_sqlite_password_and_runtime(state):
     assert not cm.initialize("旧初始化密码")
     assert cm.db.revision() == revision
     restarted = ConfigManager(cm.db.path)
-    assert restarted.load_config().web_password == "后台新密码"
+    assert verify_password(restarted.load_config().web_password, "后台新密码")
     assert restarted.get_config().download_workers == 8
     assert restarted.db.get_progress("task")["last_message_id"] == 25
     assert not list(Path(cm.db.path).parent.glob("*.json"))
@@ -145,7 +143,7 @@ def legacy_database(tmp_path):
     db = Database(tmp_path / "forwarder.db")
     cm = ConfigManager(database=db, project_root=tmp_path)
     cm.initialize("保留密码")
-    from src.models import ForwardTask
+    from tg_forwarder.tasks.models import ForwardTask
     cm.add_task(ForwardTask("task", -1001, -1002, 0, 0))
     db.save_progress({"task_id": "task", "last_message_id": 88, "forwarded_count": 9})
     db.save_transfer("task", {"state": "interrupted", "message_ids": [89]})
@@ -173,7 +171,7 @@ def test_migration_preserves_state_and_removes_stale_credential_copies(tmp_path)
     assert remove_deployment_fields(db, digest)
     assert not remove_deployment_fields(db)
     config = ConfigManager(database=db, project_root=tmp_path).load_config()
-    assert config.web_password == "保留密码"
+    assert verify_password(config.web_password, "保留密码")
     assert [task.task_id for task in config.tasks] == ["task"]
     assert db.get_progress("task")["last_message_id"] == 88
     assert db.get_transfer("task")["message_ids"] == [89]
@@ -225,57 +223,48 @@ def test_migration_preserves_custom_env_values_and_detects_database_race(tmp_pat
     assert "api_hash" in db.get_app_config()
 
 
-@pytest.mark.asyncio
-async def test_removed_json_routes_and_readonly_deployment_fields(state, tmp_path):
+def test_removed_json_routes_and_readonly_deployment_fields(state, tmp_path):
+    from tests.http_support import http_client, login
     cm, _, _ = state
-    mgr = manager(state)
     config = startup(tmp_path)
-    server = WebServer(mgr.progress_tracker, mgr, startup=config)
-    async with TestClient(TestServer(server.create_app())) as client:
+    with http_client(state, tmp_path) as (client, runtime):
+        headers = login(client)
         for route in ("/api/config/sync-json", "/api/config/backup"):
-            assert (await client.post(route)).status == 404
-        response = await client.get("/api/deployment")
-        assert response.status == 200
-        body = await response.text()
+            assert client.post(route, headers=headers).status_code == 404
+        response = client.get("/api/deployment")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
         assert config.api_hash not in body and config.phone not in body
         before = cm.db.get_app_config()
         for data in ({"web_port": 1234}, {"api_id": 4321}, {"bot_token": "invalid"}):
-            assert (await client.put("/api/config", json=data)).status == 400
+            assert client.put("/api/config", headers=headers, json=data).status_code == 400
         assert cm.db.get_app_config() == before
-        assert (await client.get("/api/config")).status == 200
+        assert client.get("/api/config").status_code == 200
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["network", "login", "account"])
-async def test_web_stays_available_when_telegram_cannot_start(state, tmp_path, failure):
+def test_web_stays_available_when_telegram_cannot_start(state, tmp_path, failure):
+    from tests.http_support import login
     cm, tracker, _ = state
-    service = ForwarderService(replace(startup(tmp_path), web_port=0), cm, tracker)
-    service.client.connect = AsyncMock(side_effect=ConnectionError() if failure == "network" else None)
-    service.client.is_authorized = AsyncMock(return_value=failure != "login")
-    service.client.validate_account = AsyncMock(side_effect=ValueError("会话与 TG_PHONE 不一致") if failure == "account" else None)
-    runner = asyncio.create_task(service.run())
+    created = []
+    def factory():
+        service = ForwarderService(startup(tmp_path), cm, tracker)
+        service.client.connect = AsyncMock(side_effect=ConnectionError() if failure == "network" else None)
+        service.client.is_authorized = AsyncMock(return_value=failure != "login")
+        service.client.validate_account = AsyncMock(side_effect=ValueError("会话与 TG_PHONE 不一致") if failure == "account" else None)
+        created.append(service)
+        return service
+    runtime = RuntimeBridge(factory).start()
     try:
-        for _ in range(200):
-            if service.web._runner and service.web._runner.sites and service.client.connection_status["state"] in ("error", "login_required"):
-                break
-            await asyncio.sleep(0.001)
-        assert not runner.done()
-        site = next(iter(service.web._runner.sites))
-        port = site._server.sockets[0].getsockname()[1]
-        from aiohttp import ClientSession
-        async with ClientSession() as client:
-            async with client.get(f"http://127.0.0.1:{port}/api/deployment") as response:
-                assert response.status == 200
-                body = await response.json()
-                assert body["services"]["telegram"]["state"] != "ready"
-            async with client.post(f"http://127.0.0.1:{port}/api/tasks/task/action", json={"action": "start"}) as response:
-                assert response.status == 400
-        assert not service.task_manager.has_running_tasks()
+        client = create_app(runtime).test_client()
+        headers = login(client)
+        body = client.get("/api/deployment").json
+        assert body["services"]["telegram"]["state"] != "ready"
+        assert client.post("/api/tasks/task/action", headers=headers, json={"action": "start"}).status_code == 503
+        assert not created[0].task_manager.has_running_tasks()
     finally:
-        runner.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await runner
-    assert all(worker.done() for worker in service._workers)
+        runtime.stop()
+    assert all(worker.done() for worker in created[0]._workers)
 
 
 @pytest.mark.asyncio
@@ -294,8 +283,7 @@ async def test_bot_failure_keeps_web_and_uses_shared_task_manager(state, tmp_pat
             await asyncio.sleep(0)
         assert service.bot_status["state"] == "error"
         assert config.bot_token not in json.dumps(service.status())
-        async with TestClient(TestServer(service.web.create_app())) as client:
-            assert (await client.get("/api/tasks")).status == 200
+        assert service.task_manager.task_snapshots()[0]["task_id"] == "task"
     finally:
         loop.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -323,7 +311,7 @@ async def test_nested_session_directory_is_created_before_telethon(tmp_path, mon
         assert path == str(config.session_path)
         assert Path(path).parent.is_dir()
         return telegram
-    monkeypatch.setattr("src.telegram_client.TelegramClient", create_telegram)
+    monkeypatch.setattr("tg_forwarder.telegram.client.TelegramClient", create_telegram)
     assert not config.session_path.parent.exists()
     assert await client.connect()
     await client.disconnect()
@@ -346,7 +334,7 @@ async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, 
     cm.initialize("保留密码")
     expected = tmp_path / "data/sessions/forwarder.session"
     env = env_file(tmp_path, DB_PATH=str(db_path), SESSION_PATH=str(expected))
-    monkeypatch.setattr("src.startup_config.os.environ", {"DB_PATH": str(db_path)} if source == "environment" else {})
+    monkeypatch.setattr("tg_forwarder.config.startup.os.environ", {"DB_PATH": str(db_path)} if source == "environment" else {})
     if source == "environment":
         from dotenv import set_key
         set_key(env, "DB_PATH", str(tmp_path / "wrong.db"), quote_mode="always")
@@ -356,7 +344,7 @@ async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, 
         captured.append(path)
         with session_guard(path, project_root=tmp_path):
             yield
-    monkeypatch.setattr("src.main.session_guard", isolated_guard)
+    monkeypatch.setattr("tg_forwarder.cli.session_guard", isolated_guard)
     before = cm.db.get_app_config()
     await main(["--env-file", str(env), "migrate-env"])
     assert captured == [expected]
@@ -366,10 +354,10 @@ async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, 
 
 
 def test_database_components_share_the_data_default(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.database.project_path", lambda value: project_path(value, tmp_path))
+    monkeypatch.setattr("tg_forwarder.storage.database.project_path", lambda value: project_path(value, tmp_path))
     cm = ConfigManager(project_root=tmp_path)
     cm.initialize()
-    from src.models import ForwardTask
+    from tg_forwarder.tasks.models import ForwardTask
     cm.add_task(ForwardTask("task", -1001, -1002, 0, 0))
     paths = {cm.db.path, Database().path, ProgressTracker().db.path, DedupTracker("task").db.path}
     assert paths == {str(tmp_path / DEFAULT_DB_PATH)}
@@ -381,7 +369,7 @@ async def test_migration_prepare_defaults_to_configured_db_before_validation(tmp
     db = legacy_database(tmp_path)
     path = tmp_path / ".env"
     path.write_text(f"DB_PATH='{db.path}'\n")
-    monkeypatch.setattr("src.startup_config.os.environ", {})
+    monkeypatch.setattr("tg_forwarder.config.startup.os.environ", {})
     before = db.get_app_config()
     await main(["--env-file", str(path), "migrate-env", "--prepare"])
     assert db.get_app_config() == before
@@ -399,15 +387,15 @@ def test_removed_json_commands_are_rejected():
 
 @pytest.mark.asyncio
 async def test_cli_init_reads_env_once_and_verify_uses_sqlite(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.main.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("tg_forwarder.cli.PROJECT_ROOT", tmp_path)
     env = env_file(tmp_path, DB_PATH=str(tmp_path / "forwarder.db"), WEB_INITIAL_PASSWORD="初始中文密码")
-    monkeypatch.setattr("src.startup_config.os.environ", {})
+    monkeypatch.setattr("tg_forwarder.config.startup.os.environ", {})
     await main(["--env-file", str(env), "init"])
     cm = ConfigManager(tmp_path / "forwarder.db")
     config = cm.load_config()
-    assert config.web_password == "初始中文密码"
+    assert verify_password(config.web_password, "初始中文密码")
     cm.save_app_config(replace(config, web_password="后台修改"))
     await main(["--env-file", str(env), "init"])
     await main(["--env-file", str(env), "verify-db"])
-    assert cm.load_config().web_password == "后台修改"
+    assert verify_password(cm.load_config().web_password, "后台修改")
     assert not list(tmp_path.rglob("*.json"))
