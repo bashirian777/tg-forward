@@ -30,6 +30,14 @@ def _safe_name(value: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.-]', '_', str(value))
 
 
+def _media_filename(attributes, fallback: str) -> str:
+    """Keep the source name for progress and errors, independent of disk paths."""
+    for attribute in attributes or []:
+        if isinstance(attribute, DocumentAttributeFilename) and attribute.file_name:
+            return attribute.file_name
+    return fallback
+
+
 class TelegramClientWrapper:
     """Wrapper around Telethon client for Telegram operations."""
 
@@ -237,12 +245,13 @@ class TelegramClientWrapper:
                     )
 
         logger.debug(f"Starting download: {filename}, size: {total_size}")
-        filename = _safe_name(filename or f"media_{message.id}")
-        if not os.path.splitext(filename)[1]:
+        storage_filename = _safe_name(filename or f"media_{message.id}")
+        if not os.path.splitext(storage_filename)[1]:
             import mimetypes
             mime = getattr(getattr(message.media, "document", None), "mime_type", "image/jpeg")
-            filename += mimetypes.guess_extension(mime) or ".bin"
-        destination = os.path.join(path, f"{message.id}_{filename}")
+            storage_filename += mimetypes.guess_extension(mime) or ".bin"
+        filename = filename or storage_filename
+        destination = os.path.join(path, f"{message.id}_{storage_filename}")
         started = time.monotonic()
         try:
             document = getattr(message.media, "document", None)
@@ -340,7 +349,7 @@ class TelegramClientWrapper:
             reply_to: Topic ID for forum groups
             send_as: Channel ID to send as (for sending as channel identity)
         """
-        filename = os.path.basename(file_path)
+        filename = _media_filename(attributes, os.path.basename(file_path))
         tracker = self._progress_tracker
         try:
             entity = await self.get_entity(channel_id)
@@ -535,7 +544,7 @@ class TelegramClientWrapper:
 
         last_update = [0]
         tracker = self._progress_tracker
-        filename = os.path.basename(file_path)
+        filename = _media_filename(attributes, os.path.basename(file_path))
         if (Path(file_path).parent / OWNER_FILE).exists():
             # The handler deletes sources only after persisting the reusable media.
             cleanup_after_upload = False
