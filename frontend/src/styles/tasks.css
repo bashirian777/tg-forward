@@ -1,11 +1,11 @@
 .stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 32px;
+  gap: var(--item-gap);
+  margin-bottom: var(--section-gap);
 }
 .stat {
-  padding: 20px;
+  padding: 12px 14px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -38,7 +38,7 @@
   font-weight: 650;
   letter-spacing: -0.8px;
   font-variant-numeric: tabular-nums;
-  margin: 14px 0 8px;
+  margin: 6px 0 3px;
   overflow-wrap: anywhere;
 }
 .stat-label {
@@ -50,8 +50,8 @@
   align-items: center;
   flex-wrap: wrap;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 18px;
+  gap: var(--item-gap);
+  margin-bottom: 12px;
 }
 .search {
   position: relative;
@@ -64,7 +64,7 @@
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 9px 12px 9px 35px;
+  padding: 7px 10px 7px 32px;
   font-size: 12px;
 }
 .search > span {
@@ -84,7 +84,7 @@
   gap: 4px;
 }
 .chip {
-  padding: 7px 10px;
+  padding: 6px 9px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
@@ -102,11 +102,21 @@
 }
 .task-list {
   display: grid;
-  gap: 16px;
+  gap: var(--item-gap);
+  align-items: start;
+}
+.task-list > .empty {
+  grid-column: 1 / -1;
+}
+@container page (min-width: 860px) {
+  .task-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .task-card {
-  padding: 22px 24px 0;
+  padding: 14px var(--card-padding) 0;
   min-width: 0;
+  container: task / inline-size;
 }
 .task-card:has(.task-menu[open]) {
   position: relative;
@@ -116,7 +126,7 @@
 .task-main {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 .task-head {
   justify-content: space-between;
@@ -127,8 +137,8 @@
 .task-avatar {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   background: var(--accent-soft);
   color: var(--accent);
@@ -144,7 +154,7 @@
   color: var(--faint);
   font-family: var(--mono);
   font-size: 11px;
-  margin-top: 3px;
+  margin-top: 2px;
   overflow-wrap: anywhere;
 }
 .task-badges {
@@ -190,11 +200,11 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
+  gap: 12px;
   background: var(--surface-soft);
   border-radius: var(--radius-sm);
-  padding: 12px 16px;
-  margin: 18px 0;
+  padding: 8px 12px;
+  margin: 10px 0;
 }
 .route > .icon {
   color: var(--faint);
@@ -203,7 +213,7 @@
   display: block;
   font-size: 10px;
   color: var(--faint);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .route code {
   font-size: 12px;
@@ -213,13 +223,13 @@
 .task-meta {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px 12px;
 }
 .task-meta .k {
   display: block;
   font-size: 11px;
   color: var(--faint);
-  margin-bottom: 5px;
+  margin-bottom: 2px;
 }
 .task-meta .v {
   display: block;
@@ -233,7 +243,7 @@
   font-weight: 400;
 }
 .task-rules {
-  margin-top: 16px;
+  margin-top: 10px;
 }
 .task-rules > summary {
   font-size: 11px;
@@ -247,12 +257,12 @@
 .tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 6px;
 }
 .tag {
   display: inline-block;
-  padding: 4px 8px;
+  padding: 3px 7px;
   font-size: 11px;
   background: var(--surface-soft);
   border: 1px solid var(--border);
@@ -266,9 +276,9 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 14px 0;
-  margin-top: 18px;
+  gap: 8px;
+  padding: 8px 0;
+  margin-top: 10px;
   border-top: 1px solid var(--border);
 }
 .task-secondary {
@@ -281,7 +291,7 @@
 .task-buttons {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-left: auto;
 }
 .error-button {
@@ -308,8 +318,8 @@
 .task-menu > summary {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--muted);
@@ -341,7 +351,7 @@
   border: 0;
   background: transparent;
   justify-content: flex-start;
-  padding: 10px;
+  padding: 8px 10px;
   font-weight: 400;
 }
 .menu-action.btn:hover {
@@ -353,8 +363,8 @@
   margin: 5px 3px;
 }
 .transfer-strip {
-  padding: 14px 16px;
-  margin-top: 18px;
+  padding: 10px 12px;
+  margin-top: 10px;
   border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--accent) 3%, var(--surface));
@@ -386,7 +396,7 @@
   font-size: 11px;
 }
 .transfer-filename {
-  margin-top: 8px;
+  margin-top: 5px;
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
@@ -395,7 +405,7 @@
   height: 5px;
   background: var(--border);
   border-radius: 4px;
-  margin-top: 12px;
+  margin-top: 8px;
   overflow: hidden;
 }
 .progress .fill {
@@ -410,19 +420,41 @@
 .transfer-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
-  margin-top: 8px;
+  gap: 4px 12px;
+  margin-top: 5px;
   color: var(--faint);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+@container task (min-width: 500px) {
+  .route > div {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    min-width: 0;
+  }
+  .route-label {
+    margin-bottom: 0;
+  }
+}
+@container task (min-width: 700px) {
+  .task-meta > div {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 6px;
+  }
+  .task-meta .k {
+    margin-bottom: 0;
+  }
+}
+@container task (max-width: 460px) {
+  .task-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 @media (max-width: 1000px) {
-  .stats {
-    gap: 12px;
-  }
-  .stat {
-    padding: 16px;
-  }
   .stat-label {
     display: none;
   }
@@ -430,8 +462,10 @@
 @media (max-width: 600px) {
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-    margin-bottom: 24px;
+    gap: 8px;
+  }
+  .stat {
+    padding: 10px 12px;
   }
   .stat-num {
     margin-bottom: 0;
@@ -445,10 +479,8 @@
     gap: 2px;
   }
   .chip {
-    padding: 8px 9px;
-  }
-  .task-card {
-    padding: 18px 16px 0;
+    padding: 6px 8px;
+    min-height: 32px;
   }
   .task-head {
     align-items: flex-start;
@@ -457,19 +489,19 @@
     flex-direction: column;
     align-items: flex-end;
   }
-  .task-meta {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
   .route {
-    gap: 10px;
-    padding: 10px 12px;
+    gap: 8px;
+    padding: 8px 10px;
   }
   .route code {
     font-size: 11px;
   }
   .task-actions {
-    gap: 12px;
+    gap: 8px;
+  }
+  .task-menu > summary {
+    width: 36px;
+    height: 36px;
   }
   .task-ready {
     display: none;

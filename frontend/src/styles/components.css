@@ -3,7 +3,8 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  padding: 9px 13px;
+  padding: 7px 11px;
+  min-height: 32px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
   background: var(--surface);
@@ -52,7 +53,7 @@
 }
 .btn.block {
   width: 100%;
-  padding: 12px 16px;
+  padding: 9px 14px;
 }
 .btn.busy {
   pointer-events: none;
@@ -67,8 +68,8 @@
   animation: spin 0.7s linear infinite;
 }
 .icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
   border: 1px solid var(--border);
@@ -94,8 +95,8 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-bottom: 20px;
-  padding: 12px 14px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--red) 30%, var(--border));
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--red) 7%, var(--surface));
@@ -111,7 +112,7 @@
   background: var(--surface);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
-  padding: 48px 24px;
+  padding: 32px 20px;
   text-align: center;
   color: var(--muted);
 }
@@ -120,7 +121,7 @@
   place-items: center;
   width: 48px;
   height: 48px;
-  margin: 0 auto 16px;
+  margin: 0 auto 12px;
   border-radius: 12px;
   background: var(--surface-soft);
   color: var(--faint);
@@ -140,38 +141,45 @@
 }
 .system-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: var(--item-gap);
 }
 .resource-card {
-  padding: 22px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-content: start;
+  gap: 12px;
+  padding: var(--card-padding);
 }
 .resource-icon {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 20px;
+  width: 32px;
+  height: 32px;
   background: var(--accent-soft);
   color: var(--accent);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 .resource-card .config-item .v {
   font-size: 21px;
   font-weight: 600;
-  margin-top: 9px;
+  margin-top: 4px;
 }
 .resource-card .config-item .sub {
-  margin-top: 8px;
+  margin-top: 4px;
+}
+.resource-card .progress {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 .info-note {
   display: flex;
-  gap: 12px;
-  padding: 20px;
+  gap: 10px;
+  padding: 12px 14px;
   background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  margin-top: 20px;
+  margin-top: var(--section-gap);
   color: var(--muted);
 }
 .info-note .icon {
@@ -189,22 +197,22 @@
 }
 .settings-view {
   display: grid;
-  gap: 20px;
+  gap: var(--section-gap);
 }
 .settings-card {
-  padding: 24px;
+  padding: var(--card-padding);
 }
 .settings-card .section-heading {
-  margin-bottom: 24px;
+  margin-bottom: 12px;
 }
 .config-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 32px;
+  gap: 0 20px;
 }
 .config-item {
   min-width: 0;
-  padding: 14px 0;
+  padding: 9px 0;
   border-top: 1px solid var(--border);
 }
 .config-item.full {
@@ -220,7 +228,7 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--text);
-  margin-top: 6px;
+  margin-top: 3px;
   overflow-wrap: anywhere;
 }
 .config-item .sub,
@@ -238,10 +246,10 @@
 .connection-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: var(--item-gap);
 }
 .connection-item {
-  padding: 16px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
@@ -254,7 +262,7 @@
 }
 .connection-item p {
   color: var(--muted);
-  margin-top: 7px;
+  margin-top: 4px;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -284,11 +292,11 @@
   font-weight: 400;
 }
 .deployment-details[open] .config-panel {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 .settings-footnote {
-  margin-top: 14px;
-  padding-top: 14px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid var(--border);
   font-size: 12px;
   color: var(--muted);
@@ -302,8 +310,8 @@
 .log-row {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
-  gap: 20px;
-  padding: 17px 20px;
+  gap: 12px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
 .log-row:last-child {
@@ -328,7 +336,7 @@
 .log-detail {
   font-size: 12px;
   color: var(--muted);
-  margin-top: 4px;
+  margin-top: 2px;
   overflow-wrap: anywhere;
 }
 .log-task {
@@ -336,7 +344,7 @@
   font-size: 12px;
   color: var(--red);
   overflow-wrap: anywhere;
-  margin-top: -12px;
+  margin-top: -6px;
 }
 .log-task:empty {
   display: none;
@@ -363,25 +371,42 @@
 .toast .icon {
   color: var(--green);
 }
-@media (max-width: 1050px) {
-  .system-grid {
-    grid-template-columns: 1fr;
-  }
-}
 @media (max-width: 600px) {
+  .system-grid,
   .config-panel,
   .connection-grid {
     grid-template-columns: 1fr;
   }
-  .settings-card {
-    padding: 18px;
-  }
   .log-row {
     grid-template-columns: 75px minmax(0, 1fr);
-    gap: 12px;
-    padding: 16px;
+    gap: 10px;
+    padding: 10px 12px;
   }
   .deployment-details > summary .sub {
     display: none;
+  }
+  .btn {
+    min-height: 36px;
+  }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+@media (pointer: coarse) {
+  button.btn,
+  button.chip,
+  button.icon-btn,
+  button.modal-close,
+  .task-menu > summary,
+  .form-field input:not([type="checkbox"]),
+  .auth-panel input,
+  .search input {
+    min-height: 40px;
+  }
+  .icon-btn,
+  .modal-close,
+  .task-menu > summary {
+    min-width: 40px;
   }
 }

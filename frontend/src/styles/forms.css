@@ -10,14 +10,14 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 18px;
-  padding: 32px;
+  padding: 24px;
   box-shadow: 0 12px 48px rgb(16 24 40 / 5%);
 }
 .auth-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 32px;
+  margin-bottom: 20px;
   font-size: 17px;
   font-weight: 650;
 }
@@ -34,15 +34,15 @@
 .auth-panel form {
   display: grid;
   gap: 10px;
-  margin-top: 28px;
+  margin-top: 20px;
 }
 .auth-panel label {
   font-size: 12px;
   font-weight: 500;
 }
 .auth-panel input {
-  padding: 12px;
-  margin-bottom: 4px;
+  padding: 10px 12px;
+  margin-bottom: 2px;
 }
 .auth-error {
   color: var(--red);
@@ -54,7 +54,7 @@
   text-align: center;
   color: var(--faint);
   font-size: 10px;
-  margin-top: 20px;
+  margin-top: 14px;
 }
 .auth-panel input,
 .form-field input:not([type="checkbox"]),
@@ -82,15 +82,15 @@
   z-index: 100;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 16px;
   background: rgb(11 18 30 / 48%);
 }
 .modal-panel {
   width: min(700px, 100%);
-  max-height: calc(100dvh - 48px);
+  max-height: calc(100dvh - 32px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 28px;
+  padding: 20px;
   border: 1px solid var(--border);
   border-radius: 16px;
   background: var(--surface);
@@ -106,8 +106,8 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 .modal-head h2 {
   font-size: 18px;
@@ -116,7 +116,7 @@
 .subtitle {
   font-size: 12px;
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: 4px;
   line-height: 1.7;
 }
 .modal-close {
@@ -140,11 +140,11 @@
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px 20px;
+  gap: 12px 16px;
 }
 .form-field {
   display: grid;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
   align-content: start;
 }
@@ -166,7 +166,7 @@
 }
 .form-field input:not([type="checkbox"]),
 .form-field textarea {
-  padding: 10px 12px;
+  padding: 8px 10px;
   min-width: 0;
 }
 .form-field input[type="checkbox"] {
@@ -176,7 +176,7 @@
   flex: 0 0 auto;
 }
 .form-field textarea {
-  min-height: 78px;
+  min-height: 64px;
   resize: vertical;
   line-height: 1.6;
 }
@@ -199,7 +199,7 @@
 .form-section {
   border: 0;
   padding: 0;
-  margin: 24px 0 0;
+  margin: 16px 0 0;
   min-width: 0;
 }
 .form-section > legend {
@@ -207,25 +207,26 @@
   color: var(--muted);
   font-weight: 550;
   padding: 0;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 .form-section:first-child {
   margin-top: 0;
 }
 .advanced-fields {
-  margin-top: 24px;
-  padding-top: 20px;
+  margin-top: 16px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
 }
 .advanced-fields > summary {
   color: var(--muted);
   font-size: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 .switches {
   display: grid;
-  gap: 18px;
-  padding: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface-soft);
@@ -233,9 +234,13 @@
 .switch {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
   cursor: pointer;
   position: relative;
+  min-width: 0;
+}
+.switch:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 .switch input {
   position: absolute;
@@ -285,7 +290,7 @@
   color: var(--muted);
   font-size: 11px;
   font-weight: 400;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 .switch.locked {
   opacity: 0.5;
@@ -295,15 +300,18 @@
   min-height: 18px;
   color: var(--red);
   font-size: 12px;
-  margin-top: 16px;
+  margin-top: 12px;
+}
+.modal-error:empty {
+  display: none;
 }
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
   border-top: 1px solid var(--border);
-  padding-top: 18px;
-  margin-top: 14px;
+  padding-top: 12px;
+  margin-top: 16px;
 }
 .confirm-message {
   color: var(--muted);
@@ -316,8 +324,8 @@
   gap: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 14px;
-  margin-bottom: 22px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
   background: var(--surface-soft);
 }
 .error-modal-panel {
@@ -327,10 +335,10 @@
   max-height: 50dvh;
   overflow-y: auto;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 .error-item {
-  padding: 16px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--red);
   border-radius: var(--radius-sm);
@@ -358,14 +366,14 @@
   font-size: 11px;
 }
 .error-item-meta {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--muted);
   font-size: 11px;
   overflow-wrap: anywhere;
 }
 .error-item-message {
-  margin: 12px 0 0;
-  padding: 12px;
+  margin: 8px 0 0;
+  padding: 10px;
   background: var(--surface);
   border-radius: 6px;
   font: 11px/1.7 var(--mono);
@@ -377,17 +385,22 @@
     padding: 12px;
   }
   .modal-panel {
-    padding: 20px;
+    padding: 16px;
     max-height: calc(100dvh - 24px);
   }
-  .form-grid {
+  .form-grid,
+  .switches {
     grid-template-columns: 1fr;
-    gap: 16px;
+    gap: 12px;
   }
   .form-field.full {
     grid-column: auto;
   }
   .auth-panel {
-    padding: 28px 24px;
+    padding: 24px 20px;
+  }
+  .modal-close {
+    width: 36px;
+    height: 36px;
   }
 }
