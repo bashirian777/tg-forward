@@ -105,3 +105,25 @@ async def test_deleted_document_during_reference_refresh_requires_operator(state
     with pytest.raises(PermanentTransferError, match="deleted or replaced"):
         await client.download_media(video(), str(tmp_path), task_id="task")
     assert download.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_page_asset_urls_change_when_scripts_change(state, tmp_path, monkeypatch):
+    import re
+    monkeypatch.setattr("src.web_server.STATIC_DIR", tmp_path)
+    (tmp_path / "index.html").write_text('<link href="/static/app.css"><script src="/static/app.js" defer></script>')
+    (tmp_path / "app.css").write_text("body { color: black; }")
+    (tmp_path / "app.js").write_text("console.log('old');")
+    mgr = manager(state)
+    server = WebServer(mgr.progress_tracker, mgr)
+    async with TestClient(TestServer(server.create_app())) as client:
+        response = await client.get("/")
+        assert response.headers["Cache-Control"] == "no-store"
+        before = re.findall(r'/static/[^"<>]+', await response.text())
+        assert len(before) == 2 and all("?v=" in url for url in before)
+        (tmp_path / "app.js").write_text("console.log('new');")
+        after = re.findall(r'/static/[^"<>]+', await (await client.get("/")).text())
+        assert before[0] == after[0]
+        assert before[1] != after[1]
+        assert await (await client.get(after[1])).text() == "console.log('new');"
+        assert (await client.get("/static/missing.js")).status == 404

@@ -1,4 +1,5 @@
 """Simple web server for viewing forwarding progress."""
+import hashlib
 import hmac
 import json
 import logging
@@ -19,6 +20,7 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_ASSETS = {"app.css": "text/css", "app.js": "application/javascript"}
 
 
 class WebServer:
@@ -161,18 +163,18 @@ class WebServer:
         })
 
     async def handle_index(self, request):
-        """Serve the admin page. no-cache keeps file edits visible after refresh."""
-        return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        """Pair the page with the current assets, even across browser caches."""
+        return web.Response(text=self._generate_html(), content_type="text/html",
+            headers={"Cache-Control": "no-store"})
 
     async def handle_static(self, request):
         """Serve static assets from the whitelisted set."""
         name = request.match_info.get("name", "")
-        allowed = {"app.css": "text/css", "app.js": "application/javascript"}
-        if name not in allowed:
+        if name not in STATIC_ASSETS:
             raise web.HTTPNotFound()
         return web.FileResponse(
             STATIC_DIR / name,
-            headers={"Content-Type": allowed[name], "Cache-Control": "no-cache"},
+            headers={"Content-Type": STATIC_ASSETS[name], "Cache-Control": "no-cache"},
         )
 
     async def handle_api_status(self, request):
@@ -546,5 +548,8 @@ class WebServer:
         return web.json_response(result)
 
     def _generate_html(self):
-        """Legacy compatibility: no longer inlined; served from /static files."""
-        return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        for name in STATIC_ASSETS:
+            version = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:16]
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={version}")
+        return html
