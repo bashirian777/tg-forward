@@ -16,7 +16,7 @@ from .paths import PROJECT_ROOT, project_path
 from .progress_tracker import ProgressTracker
 from .service import ForwarderService, connect_user, create_user_client
 from .session_guard import project_processes, session_guard
-from .startup_config import StartupConfig, StartupConfigurationError
+from .startup_config import StartupConfig, StartupConfigurationError, read_startup_values
 from .task_manager import TaskManager
 from .temp_cleaner import cleanup_temp_dir
 from .workspace import WorkspaceStore
@@ -101,14 +101,16 @@ def create_parser():
     delete.add_argument("task_id")
     commands.add_parser("verify-db", help="Check SQLite integrity and foreign keys")
     migration = commands.add_parser("migrate-env", help="Move existing SQLite deployment settings to .env")
-    migration.add_argument("--db", default="config/forwarder.db", help="Existing database to migrate")
+    migration.add_argument("--db", help="Existing database to migrate (defaults to DB_PATH from environment or .env)")
     migration.add_argument("--prepare", action="store_true", help="Prepare .env only; finish migration after stopping the old service")
     return parser
 
 
 def migrate_environment(args):
-    db_path = project_path(args.db)
-    env_file = project_path(args.env_file)
+    env_file, values, _ = read_startup_values(args.env_file)
+    if args.db is None and not values["DB_PATH"].strip():
+        raise StartupConfigurationError("DB_PATH cannot be empty")
+    db_path = project_path(args.db if args.db is not None else values["DB_PATH"])
     if args.prepare:
         prepare_env(db_path, env_file)
         print(f"Environment file prepared at {env_file}; database unchanged")

@@ -32,7 +32,7 @@ async function setup(context) {
     }
     if (url.pathname === "/api/config") return send(config);
     if (url.pathname === "/api/system") return send({ disk: { free: 85e9, used: 115e9, total: 200e9, percent: 57.5 }, temp_exists: true, temp_dir: config.temp_dir, temp_files: { files: 12, bytes: 2.3e9 }, load_average: [0.18, 0.24, 0.21], uptime_seconds: 93240 });
-    if (url.pathname === "/api/deployment") return send({ services: { telegram: { state: "ready", message: "已连接，可以启动转发任务" }, bot: { state: "ready", message: "Bot 已连接" } }, fields: { TG_API_HASH: { configured: true, source: ".env" }, TG_PHONE: { configured: true, source: ".env" }, DB_PATH: { value: "config/forwarder.db", source: ".env" }, WEB_HOST: { value: "127.0.0.1", source: "default" }, WEB_PORT: { value: 10082, source: ".env" } } });
+    if (url.pathname === "/api/deployment") return send({ services: { telegram: { state: "ready", message: "已连接，可以启动转发任务" }, bot: { state: "ready", message: "Bot 已连接" } }, fields: { TG_API_HASH: { configured: true, source: ".env" }, TG_PHONE: { configured: true, source: ".env" }, DB_PATH: { value: "data/forwarder.db", source: ".env" }, WEB_HOST: { value: "127.0.0.1", source: "default" }, WEB_PORT: { value: 10082, source: ".env" } } });
     if (url.pathname === "/api/logs") return send([{ id: 3, action: "启动任务", task_id: "daily", result: "success", created_at: new Date().toISOString() }, { id: 2, action: "更新运行配置", result: "success", created_at: new Date().toISOString() }, { id: 1, action: "Telegram 上传失败", task_id: "archive", result: "error", error: "网络连接中断，等待重试", created_at: new Date().toISOString() }]);
     const match = url.pathname.match(/^\/api\/tasks\/([^/]+)(.*)$/);
     if (match) {

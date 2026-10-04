@@ -35,9 +35,9 @@ temp/*
 
 # Runtime data
 data/
-config/forwarder.db*
 
 # Legacy runtime locations
+config/forwarder.db*
 bot.pid
 nohup.out
 logs/

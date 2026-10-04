@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, Iterable, Optional
 
 from .models import RuntimeConfig
-from .paths import project_path
+from .paths import DEFAULT_DB_PATH, project_path
 
 
 class ConfigurationConflict(ValueError):
@@ -17,7 +17,7 @@ class ConfigurationConflict(ValueError):
 class Database:
     """Small transactional SQLite repository used by all application layers."""
 
-    def __init__(self, path: str = "config/forwarder.db", *, create=True):
+    def __init__(self, path: str = str(DEFAULT_DB_PATH), *, create=True):
         self.path = str(project_path(path))
         if not create and not os.path.isfile(self.path):
             raise FileNotFoundError("Database not found; run 'init' or check DB_PATH")

@@ -5,7 +5,7 @@
 ## 已有服务升级
 
 1. 使用当前虚拟环境安装 `requirements.txt` 中的依赖。
-2. 执行 `.venv/bin/python -m src.main migrate-env --prepare`。这一步读取现有 SQLite 并准备权限为 600 的 `.env`，不修改运行数据库，不占用 Telegram 会话。
+2. 执行 `.venv/bin/python -m src.main migrate-env --db config/forwarder.db --prepare`，或用 `--db` 指定旧数据库的实际位置。这一步读取现有 SQLite 并准备权限为 600 的 `.env`，不修改运行数据库，不占用 Telegram 会话。准备完成后，迁移命令默认读取环境或 `.env` 中的 `DB_PATH`。
 3. 检查启动参数。若已有 `.env` 与旧凭据冲突，工具会列出冲突变量名并保留原文件；先处理冲突再迁移。
 4. 执行 `bash restart.sh`。脚本先校验配置，再向本项目服务发送 SIGTERM，等待任务和 worker 完成取消；旧进程未退出时中止，不强制杀死，不启动第二个实例。
 5. 服务停止后，脚本完成一次性数据库配置迁移，保留任务、断点、错误、去重和当前 Web 密码。新进程使用 `serve`，默认所有任务停止。
@@ -30,18 +30,19 @@ SQLite 的 `-wal`、`-shm` 文件由数据库自行管理。运行时若人工�
 
 ## 整理旧运行文件
 
-新安装的默认会话路径为 `data/sessions/forwarder.session`，`restart.sh` 的 PID 与日志分别写入 `data/run/forwarder.pid` 和 `data/logs/forwarder.log`。路径以安装目录为基准，所需目录自动创建。
+新安装的默认数据库路径为 `data/forwarder.db`，用户会话路径为 `data/sessions/forwarder.session`，`restart.sh` 的 PID 与日志分别写入 `data/run/forwarder.pid` 和 `data/logs/forwarder.log`。路径以安装目录为基准，所需目录自动创建。
 
 已有安装的 `.env` 路径会继续生效，脚本不会擅自移动正在使用的会话。迁移旧运行文件时：
 
 1. 先停止转发服务及使用同一会话的登录／测速进程，等待正常退出。
-2. 创建 `data/sessions`、`data/run`、`data/logs`，将当前 `SESSION_PATH` 指向的用户会话和存在的 `-journal`、`-wal`、`-shm`、`.lock` 文件一起移动到会话目录；目标已有文件时停止，避免覆盖另一份登录状态。
-3. 更新 `.env` 的 `SESSION_PATH=data/sessions/forwarder.session`。如系统环境变量也设置了该字段，应同步修改，因为它优先于 `.env`。
-4. 将旧 `logs/bot.log` 移至 `data/logs/forwarder.log`。历史 `nohup.out` 可移至 `data/logs/nohup.out`，旧 `bot.pid` 可移至 `data/run/forwarder.pid`；重启会更新 PID。
-5. 旧版留下的 `bot_session.session` 及其附属文件可移入 `data/sessions`。当前 Bot 使用内存会话，不读取或生成这份文件。
-6. 执行 `bash restart.sh`，检查 Web 的 Telegram／Bot 连接状态，再手动启动任务。
+2. 创建 `data`。对当前 `DB_PATH` 指向的数据库执行 `PRAGMA wal_checkpoint(TRUNCATE)`，确认没有繁忙连接，再关闭数据库连接；将主数据库及仍存在的 `-wal`、`-shm`、`-journal` 文件移至 `data/forwarder.db` 对应位置，目标已有文件时停止。更新 `.env` 的 `DB_PATH=data/forwarder.db`，核对 SQLite 完整性、外键与所有表数据。旧 `config/` 只剩空占位文件时，删除占位文件和空目录。
+3. 创建 `data/sessions`、`data/run`、`data/logs`，将当前 `SESSION_PATH` 指向的用户会话和存在的 `-journal`、`-wal`、`-shm`、`.lock` 文件一起移动到会话目录；目标已有文件时停止，避免覆盖另一份登录状态。
+4. 更新 `.env` 的 `SESSION_PATH=data/sessions/forwarder.session`。如系统环境变量也设置了 `DB_PATH` 或 `SESSION_PATH`，应同步修改，因为它优先于 `.env`。
+5. 将旧 `logs/bot.log` 移至 `data/logs/forwarder.log`。历史 `nohup.out` 可移至 `data/logs/nohup.out`，旧 `bot.pid` 可移至 `data/run/forwarder.pid`；重启会更新 PID。
+6. 旧版留下的 `bot_session.session` 及其附属文件可移入 `data/sessions`。当前 Bot 使用内存会话，不读取或生成这份文件。
+7. 执行 `bash restart.sh`，检查 Web 的 Telegram／Bot 连接状态，再手动启动任务。
 
-这里只移动现有文件，不生成备份或归档。数据库与运行设置按现有配置使用，用户会话应保留原来的登录状态。自定义的 `SESSION_PATH` 仍然支持，不要求放在默认目录。
+这里只移动现有文件，不生成备份或归档。运行设置和用户会话应保留原有内容。自定义的 `DB_PATH` 与 `SESSION_PATH` 仍然支持，不要求放在默认目录。
 
 ## 现场验收
 

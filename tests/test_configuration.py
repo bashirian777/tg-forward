@@ -15,6 +15,9 @@ from src.config_migration import prepare_env, remove_deployment_fields
 from src.database import Database
 from src.main import create_parser, main
 from src.models import RuntimeConfig
+from src.paths import DEFAULT_DB_PATH, project_path
+from src.progress_tracker import ProgressTracker
+from src.dedup_tracker import DedupTracker
 from src.service import ForwarderService
 from src.session_guard import session_guard
 from src.startup_config import StartupConfig, StartupConfigurationError
@@ -48,7 +51,7 @@ def test_env_precedence_paths_and_literal_password(tmp_path, monkeypatch):
     assert config.sources["WEB_PORT"] == "environment"
     assert config.sources["TG_API_HASH"] == ".env"
     assert config.sources["DB_PATH"] == "default"
-    assert config.db_path == tmp_path / "config/forwarder.db"
+    assert config.db_path == tmp_path / "data/forwarder.db"
     assert config.session_path == tmp_path / "data/sessions/forwarder.session"
     assert config.initial_password == "中文 # '$HOME ${TG_PHONE}"
     assert config.api_hash not in repr(config) and config.phone not in repr(config)
@@ -336,13 +339,17 @@ def test_session_guard_prevents_parallel_use(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, monkeypatch):
-    db_path = tmp_path / "config/forwarder.db"
+@pytest.mark.parametrize("source", [".env", "environment"])
+async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, monkeypatch, source):
+    db_path = tmp_path / "data/forwarder.db"
     cm = ConfigManager(db_path, create=True, project_root=tmp_path)
     cm.initialize("保留密码")
     expected = tmp_path / "data/sessions/forwarder.session"
     env = env_file(tmp_path, DB_PATH=str(db_path), SESSION_PATH=str(expected))
-    monkeypatch.setattr("src.startup_config.os.environ", {})
+    monkeypatch.setattr("src.startup_config.os.environ", {"DB_PATH": str(db_path)} if source == "environment" else {})
+    if source == "environment":
+        from dotenv import set_key
+        set_key(env, "DB_PATH", str(tmp_path / "wrong.db"), quote_mode="always")
     captured = []
     @contextmanager
     def isolated_guard(path):
@@ -351,11 +358,34 @@ async def test_repeated_migration_locks_the_configured_nested_session(tmp_path, 
             yield
     monkeypatch.setattr("src.main.session_guard", isolated_guard)
     before = cm.db.get_app_config()
-    await main(["--env-file", str(env), "migrate-env", "--db", str(db_path)])
+    await main(["--env-file", str(env), "migrate-env"])
     assert captured == [expected]
     assert Path(str(expected) + ".lock").exists()
     assert not (tmp_path / "forwarder.session.lock").exists()
     assert cm.db.get_app_config() == before
+
+
+def test_database_components_share_the_data_default(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.database.project_path", lambda value: project_path(value, tmp_path))
+    cm = ConfigManager(project_root=tmp_path)
+    cm.initialize()
+    from src.models import ForwardTask
+    cm.add_task(ForwardTask("task", -1001, -1002, 0, 0))
+    paths = {cm.db.path, Database().path, ProgressTracker().db.path, DedupTracker("task").db.path}
+    assert paths == {str(tmp_path / DEFAULT_DB_PATH)}
+    assert not (tmp_path / "config").exists()
+
+
+@pytest.mark.asyncio
+async def test_migration_prepare_defaults_to_configured_db_before_validation(tmp_path, monkeypatch):
+    db = legacy_database(tmp_path)
+    path = tmp_path / ".env"
+    path.write_text(f"DB_PATH='{db.path}'\n")
+    monkeypatch.setattr("src.startup_config.os.environ", {})
+    before = db.get_app_config()
+    await main(["--env-file", str(path), "migrate-env", "--prepare"])
+    assert db.get_app_config() == before
+    assert StartupConfig.load(path).db_path == Path(db.path)
 
 
 def test_removed_json_commands_are_rejected():

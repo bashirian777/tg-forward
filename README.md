@@ -31,6 +31,7 @@ chmod 600 .env
 
 ```text
 data/
+├── forwarder.db                    # 任务、运行设置与转发状态
 ├── sessions/                       # Telegram 用户会话、会话锁及 SQLite 附属文件
 ├── run/forwarder.pid                # restart.sh 管理的服务进程
 └── logs/forwarder.log               # 后台启动与运行日志
@@ -46,7 +47,7 @@ Bot 使用内存会话，不生成新的 Bot session 文件。已有根目录会
 | --- | --- |
 | `TG_API_ID`、`TG_API_HASH`、`TG_PHONE` | 必填，Telegram 用户账号 |
 | `TG_BOT_TOKEN`、`TG_ADMIN_IDS` | 可选，配置 token 时必须指定管理员 |
-| `DB_PATH` | `config/forwarder.db` |
+| `DB_PATH` | `data/forwarder.db` |
 | `SESSION_PATH` | `data/sessions/forwarder.session` |
 | `WEB_HOST`、`WEB_PORT` | `127.0.0.1`、`10082` |
 | `TG_PROXY_URL` | 可选，支持 `socks5://`、`socks4://`、`http://` |
@@ -78,11 +79,13 @@ Bot 使用内存会话，不生成新的 Bot session 文件。已有根目录会
 
 ```bash
 # 可在旧服务运行时准备 .env，不修改数据库
-.venv/bin/python -m src.main migrate-env --prepare
+.venv/bin/python -m src.main migrate-env --db config/forwarder.db --prepare
 # 停止旧服务后完成迁移
 .venv/bin/python -m src.main migrate-env
 .venv/bin/python -m src.main serve
 ```
+
+迁移命令默认读取系统环境或 `.env` 中的 `DB_PATH`。尚未准备 `.env` 的旧安装需用 `--db` 明确指定现有数据库；上述示例使用旧版的 `config/forwarder.db`。数据库文件整理到 `data/` 的步骤见 [部署说明](docs/deployment.md#整理旧运行文件)。
 
 迁移保留任务、断点、去重、传输、错误和当前 Web 密码，清理数据库配置与历史配置记录中的旧部署字段。已有 `.env` 中的值保留；与旧凭据冲突时列出变量名称并停止，不输出敏感值。迁移不创建归档或历史备份。重复执行完成后的 `migrate-env` 会保留现状。
 

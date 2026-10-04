@@ -10,12 +10,12 @@ from urllib.parse import unquote, urlsplit
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 
-from .paths import DEFAULT_SESSION_PATH, PROJECT_ROOT, project_path
+from .paths import DEFAULT_DB_PATH, DEFAULT_SESSION_PATH, PROJECT_ROOT, project_path
 
 DEFAULTS = {
     "TG_API_ID": "", "TG_API_HASH": "", "TG_PHONE": "",
     "TG_BOT_TOKEN": "", "TG_ADMIN_IDS": "", "TG_PROXY_URL": "",
-    "DB_PATH": "config/forwarder.db", "SESSION_PATH": str(DEFAULT_SESSION_PATH),
+    "DB_PATH": str(DEFAULT_DB_PATH), "SESSION_PATH": str(DEFAULT_SESSION_PATH),
     "WEB_HOST": "127.0.0.1", "WEB_PORT": "10082", "WEB_INITIAL_PASSWORD": "",
 }
 
@@ -41,6 +41,22 @@ def read_env_file(path):
     return dotenv_values(path, interpolate=False)
 
 
+def read_startup_values(env_file=None, *, environ=None, project_root=PROJECT_ROOT):
+    """Resolve deployment values once, including migration before credentials exist."""
+    env_file = project_path(env_file or ".env", project_root)
+    file_values = read_env_file(env_file)
+    environment = os.environ if environ is None else environ
+    values, sources = {}, {}
+    for name, default in DEFAULTS.items():
+        if name in environment:
+            values[name], sources[name] = environment[name], "environment"
+        elif name in file_values:
+            values[name], sources[name] = file_values[name] or "", ".env"
+        else:
+            values[name], sources[name] = default, "default"
+    return env_file, values, sources
+
+
 @dataclass(frozen=True)
 class StartupConfig:
     api_id: int
@@ -48,7 +64,7 @@ class StartupConfig:
     phone: str = field(repr=False)
     bot_token: str = field(default="", repr=False)
     admin_ids: Tuple[int, ...] = ()
-    db_path: Path = PROJECT_ROOT / "config/forwarder.db"
+    db_path: Path = PROJECT_ROOT / DEFAULT_DB_PATH
     session_path: Path = PROJECT_ROOT / DEFAULT_SESSION_PATH
     web_host: str = "127.0.0.1"
     web_port: int = 10082
@@ -59,17 +75,7 @@ class StartupConfig:
 
     @classmethod
     def load(cls, env_file=None, *, environ=None, project_root=PROJECT_ROOT):
-        env_file = project_path(env_file or ".env", project_root)
-        file_values = read_env_file(env_file)
-        environment = os.environ if environ is None else environ
-        values, sources = {}, {}
-        for name, default in DEFAULTS.items():
-            if name in environment:
-                values[name], sources[name] = environment[name], "environment"
-            elif name in file_values:
-                values[name], sources[name] = file_values[name] or "", ".env"
-            else:
-                values[name], sources[name] = default, "default"
+        env_file, values, sources = read_startup_values(env_file, environ=environ, project_root=project_root)
         return cls.from_values(values, env_file=env_file, sources=sources, project_root=project_root)
 
     @classmethod

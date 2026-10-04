@@ -5,12 +5,13 @@ from typing import Dict, Optional
 
 from .database import Database
 from .models import TaskProgress
+from .paths import DEFAULT_DB_PATH
 
 
 class ProgressTracker:
     """Tracks durable checkpoints and live transfer telemetry."""
 
-    def __init__(self, db_path: str = "config/forwarder.db", database: Database = None):
+    def __init__(self, db_path: str = str(DEFAULT_DB_PATH), database: Database = None):
         self.db = database or Database(db_path)
         self._progress: Dict[str, TaskProgress] = {}
         self._download_progress: Dict[str, dict] = {}

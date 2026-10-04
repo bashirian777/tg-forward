@@ -5,6 +5,7 @@ from typing import List, Optional
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 
 from .database import Database
+from .paths import DEFAULT_DB_PATH
 
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 class DedupTracker:
     """Tracks forwarded media IDs in the shared database."""
 
-    def __init__(self, task_id: str, db_path: str = "config/forwarder.db", database: Database = None):
+    def __init__(self, task_id: str, db_path: str = str(DEFAULT_DB_PATH), database: Database = None):
         self.task_id = task_id
         self.db = database or Database(db_path)
         self._file_ids = self.db.dedup_ids(task_id)

@@ -5,12 +5,12 @@ from typing import Optional
 
 from .database import Database
 from .models import ForwardTask, RuntimeConfig
-from .paths import PROJECT_ROOT
+from .paths import DEFAULT_DB_PATH, PROJECT_ROOT
 from .validators import validate_runtime_config, validate_task
 
 
 class ConfigManager:
-    def __init__(self, db_path="config/forwarder.db", *, database=None, create=True, project_root=PROJECT_ROOT):
+    def __init__(self, db_path=str(DEFAULT_DB_PATH), *, database=None, create=True, project_root=PROJECT_ROOT):
         self.db = database or Database(db_path, create=create)
         self.project_root = project_root
         self._config: Optional[RuntimeConfig] = None
