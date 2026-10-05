@@ -1,4 +1,4 @@
-import type { AuthInfo, TaskSnapshot, TaskConfig, RuntimeConfig, Deployment, SystemInfo, OperationLog, TaskError, CleanupResult } from '../types/api'
+import type { AuthInfo, TaskSnapshot, TaskConfig, RuntimeConfig, RuntimeConfigUpdate, Deployment, SystemInfo, OperationLog, TaskError, CleanupResult } from '../types/api'
 
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number, public fields: Record<string, string> = {}) { super(message) }
@@ -62,7 +62,7 @@ export const api = {
   clearDedup: (id: string) => request(taskPath(id) + '/dedup', { method: 'DELETE' }),
   cleanupTask: (id: string) => request<CleanupResult>(taskPath(id) + '/cleanup', { method: 'POST' }),
   config: (signal?: AbortSignal) => request<RuntimeConfig>('/api/config', { signal }),
-  updateConfig: (data: Partial<RuntimeConfig> & { web_password?: string }) => request('/api/config', { method: 'PUT', data }),
+  updateConfig: (data: RuntimeConfigUpdate) => request('/api/config', { method: 'PUT', data }),
   deployment: (signal?: AbortSignal) => request<Deployment>('/api/deployment', { signal }),
   system: (signal?: AbortSignal) => request<SystemInfo>('/api/system', { signal }),
   logs: (signal?: AbortSignal) => request<OperationLog[]>('/api/logs?limit=20', { signal }),

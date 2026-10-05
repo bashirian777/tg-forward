@@ -7,14 +7,13 @@ from telethon import types
 
 from tg_forwarder.telegram.transfer import ParallelTransfer
 from tg_forwarder.telegram.client import _safe_name
-from tests.test_integrity import state
-from tests.test_media_artwork import video, wrapper
+from tests.support import video, wrapper
 
 
 @pytest.mark.asyncio
 async def test_chinese_filename_survives_download_and_upload_progress(state, tmp_path, monkeypatch):
     _, tracker, _ = state
-    client = wrapper()
+    client = wrapper(database=tracker.db)
     client.set_progress_tracker(tracker)
     message = video(message_id=23)
     original_name = "中文视频测试 🎬 3P.mp4"
@@ -51,7 +50,7 @@ async def test_chinese_filename_survives_download_and_upload_progress(state, tmp
 @pytest.mark.asyncio
 async def test_unsafe_source_name_is_displayed_without_becoming_a_path(state, tmp_path, monkeypatch):
     _, tracker, _ = state
-    client = wrapper()
+    client = wrapper(database=tracker.db)
     client.set_progress_tracker(tracker)
     message = video()
     original_name = "../../目录\\中文视频.mp4"

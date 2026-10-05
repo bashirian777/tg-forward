@@ -1,9 +1,8 @@
 """Runtime settings and tasks, with record-level optimistic concurrency."""
-import json
 from copy import deepcopy
 from typing import Optional
 
-from .database import Database
+from .database import Database, ConfigurationConflict
 from .passwords import hash_password, migrate_passwords, FORMAT_VERSION
 from tg_forwarder.tasks.models import ForwardTask
 from tg_forwarder.config.models import RuntimeConfig
@@ -31,17 +30,7 @@ class ConfigManager:
 
     def load_config(self) -> RuntimeConfig:
         migrate_passwords(self.db)
-        # Values and their revisions must come from the same snapshot.
-        with self.db.connection() as db:
-            db.execute("BEGIN")
-            row = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
-            if not row:
-                raise FileNotFoundError("Database is not initialized; run 'init'")
-            app = json.loads(row["data"])
-            revision = row["revision"]
-            tasks = db.execute("SELECT data,revision,task_id FROM tasks ORDER BY task_id").fetchall()
-            raw_tasks = {row["task_id"]: json.loads(row["data"]) for row in tasks}
-            revisions = {row["task_id"]: row["revision"] for row in tasks}
+        app, revision, raw_tasks, revisions = self.db.configuration_snapshot()
         if set(app) - RuntimeConfig.setting_names():
             raise ValueError("Database still contains deployment settings; run 'migrate-env'")
         config = RuntimeConfig.from_dict(dict(app, tasks=list(raw_tasks.values())))
@@ -62,36 +51,16 @@ class ConfigManager:
             self._app_revision if expected_revision is None else expected_revision)
         self.load_config()
 
-    def save_config(self, config: RuntimeConfig):
-        """Save changed records; removing tasks requires an explicit delete."""
-        if type(config) is not RuntimeConfig:
-            raise TypeError("Expected RuntimeConfig")
-        candidate = deepcopy(config)
-        validate_runtime_config(candidate, self.project_root)
-        for task in candidate.tasks:
-            validate_task(task)
-        if len({task.task_id for task in candidate.tasks}) != len(candidate.tasks):
-            raise ValueError("Task IDs must be unique")
-        if not self.db.get_app_config():
-            candidate.web_password = hash_password(candidate.web_password)
-            self.db.save_config(candidate.settings_dict(), [task.to_dict() for task in candidate.tasks], password_format=FORMAT_VERSION)
-            self.load_config()
-            return
-        revisions, old_tasks = dict(self._task_revisions), deepcopy(self._raw_tasks)
-        if candidate.settings_dict() != RuntimeConfig.from_dict(self._raw_app).settings_dict():
-            self.save_app_config(candidate)
-        for task in candidate.tasks:
-            old = old_tasks.get(task.task_id)
-            if old is None or ForwardTask.from_dict(old).to_dict() != task.to_dict():
-                self.db.save_task(dict(old or {}, **task.to_dict()), revisions.get(task.task_id, 0))
-        self.load_config()
-
     @property
     def revision(self):
         return self._app_revision
 
     def task_revision(self, task_id):
         return self._task_revisions.get(task_id, 0)
+
+    def check_task_revision(self, task_id, expected_revision):
+        if expected_revision is not None and expected_revision != self.task_revision(task_id):
+            raise ConfigurationConflict("配置已被其他操作修改，请重新读取后再保存")
 
     def get_config(self):
         return self._config
@@ -101,6 +70,8 @@ class ConfigManager:
 
     def add_task(self, task, start_id=0):
         validate_task(task)
+        if type(start_id) is not int or start_id < 0:
+            raise ValueError("起始消息 ID 必须是非负整数")
         self.db.save_task(task.to_dict(), expected_revision=0,
             source_reset={"last_message_id": start_id, "clear_dedup": False} if start_id else None)
         self.load_config()

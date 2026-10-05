@@ -23,7 +23,7 @@ make ui-test
 src/tg_forwarder/
 ├── cli.py / __main__.py     # tg-forward 和 python -m tg_forwarder
 ├── config/                 # 启动环境、运行模型、路径、校验、旧配置迁移
-├── tasks/                  # 任务模型、校验、错误、统一管理入口
+├── tasks/                  # 任务模型、运行管理、设置校验、查询快照与统一入口
 ├── forwarding/             # 相册调度、过滤、复制与下载回退
 ├── telegram/               # Telethon、会话锁、分块传输、发送回执、封面
 ├── storage/                # SQLite、配置、断点、去重、任务工作目录
@@ -32,12 +32,21 @@ src/tg_forwarder/
 └── bot/                    # 管理命令、任务创建会话
 frontend/                   # Vue / TypeScript
 scripts/                    # 构建与测速
-└── tests/                  # Python 和 HTTP 回归
+tests/                      # Python、真实 HTTP 与离线契约回归
+├── conftest.py             # 临时数据库等共享 pytest 夹具
+├── support.py              # 模拟媒体、客户端和启动配置工厂
+└── web/                    # 浏览器静态服务器与真实离线 API 服务器
 ```
 
 长生命周期 asyncio 循环是业务状态的唯一所有者。Flask HTTP 线程通过 `RuntimeBridge` 调用管理操作，不直接访问任务内部字典、Telethon 或进度缓存。查询返回独立快照；超时或浏览器断开不取消已提交业务，使用 operation ID 查询结果。
 
-新增任务操作放在 `TaskManager`，Web、Bot、CLI 复用其公开方法。复合操作持有一个任务锁，锁内调用私有步骤，避免重复获取同一锁。设置变更和启动通过设置锁协调。保持 SQLite 为唯一运行配置来源，不恢复 JSON 配置同步。
+新增任务操作放在 `TaskManager`，Web、Bot、CLI 复用其公开方法。任务生命周期及操作锁由 manager 持有；`RuntimeSettings` 负责设置候选值校验、持久化和审计，`ManagementQueries` 负责独立查询快照。HTTP dispatcher 只访问 manager 的公开接口，不穿透数据库或进度缓存。复合操作持有一个任务锁，锁内调用私有步骤，避免重复获取同一锁。设置变更和启动通过设置锁协调。保持 SQLite 为唯一运行配置来源，不恢复 JSON 配置同步。
+
+配置按记录初始化、修改和删除，不提供通用整份 `save_config`。来源变更规则在持久化事务内也必须检查；更换来源、重置断点及清除回执须原子完成，事务成功后才更新内存。先检查记录版本，再判断来源变更，避免旧表单收到错误的来源重置提示。
+
+可靠发送器、并行传输器及指标记录回调在 runtime / CLI 的客户端组装入口显式配置。进度对象只负责遥测；它的类型不能选择传输路径。任务工作目录由 manager 显式传入 handler；上传是否转成可复用媒体、何时清理源文件由调用参数决定，不通过目录中的 owner 文件猜测。媒体组传输快照的创建与完成清理由 engine 管理。
+
+共享测试夹具放 `tests/conftest.py`，工厂放 `tests/support.py`，不要从其他 `test_*.py` 导入。独立测试使用临时 session 路径；锁按真实 session 文件互斥，旧进程兼容检查也必须核对实际 session，不因工作目录相同阻止测试。
 
 涉及相册边界、取消、下载块校验、上传身份、`random_id` 或发送回执时，保留既有可靠性测试，增加针对具体故障的回归。普通样式 / 文案变更用构建和现有浏览器测试验证，避免增加只重复实现细节的测试。
 

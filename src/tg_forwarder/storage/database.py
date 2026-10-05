@@ -8,6 +8,7 @@ from typing import Dict, Iterable, Optional
 
 from tg_forwarder.config.models import RuntimeConfig
 from tg_forwarder.config.paths import DEFAULT_DB_PATH, project_path
+from tg_forwarder.tasks.validation import validate_source_reset
 
 
 class ConfigurationConflict(ValueError):
@@ -174,6 +175,18 @@ class Database:
         return {"ok": checks == ["ok"] and not foreign_keys,
             "integrity": checks, "foreign_key_errors": foreign_keys}
 
+    def configuration_snapshot(self):
+        """Read configuration values and revisions from one SQLite snapshot."""
+        with self.connection() as db:
+            db.execute("BEGIN")
+            app = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
+            if app is None:
+                raise FileNotFoundError("Database is not initialized; run 'init'")
+            tasks = db.execute("SELECT task_id,data,revision FROM tasks ORDER BY task_id").fetchall()
+            return (json.loads(app["data"]), app["revision"],
+                {row["task_id"]: json.loads(row["data"]) for row in tasks},
+                {row["task_id"]: row["revision"] for row in tasks})
+
     def get_app_config(self) -> Optional[dict]:
         with self.connection() as db:
             row = db.execute("SELECT data FROM app_settings WHERE id = 1").fetchone()
@@ -224,38 +237,17 @@ class Database:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_revision(db, "tasks", data["task_id"], expected_revision)
+            old = db.execute("SELECT data FROM tasks WHERE task_id=?", (data["task_id"],)).fetchone()
+            validate_source_reset(json.loads(old["data"]) if old else None, data, source_reset)
             db.execute(
                 "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
                 "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
                 (data["task_id"], json.dumps(data, ensure_ascii=False), self._now()),
             )
             if source_reset is not None:
-                for table in ("processed_messages", "send_intents", "active_transfers", "task_progress"):
-                    db.execute(f"DELETE FROM {table} WHERE task_id=?", (data["task_id"],))
-                if source_reset["clear_dedup"]:
-                    db.execute("DELETE FROM dedup_records WHERE task_id=?", (data["task_id"],))
+                self._delete_task_state(db, data["task_id"], source_reset["clear_dedup"])
                 db.execute("INSERT INTO task_progress(task_id,last_message_id,updated_at) VALUES(?,?,?)",
                            (data["task_id"], source_reset["last_message_id"], self._now()))
-
-    def save_config(self, app_data: dict, tasks: Iterable[dict], password_format=None) -> None:
-        """Save a runtime snapshot without deleting absent tasks or child rows."""
-        self._validate_settings(app_data)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            now = self._now()
-            db.execute(
-                "INSERT INTO app_settings(id, data, updated_at) VALUES(1, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=app_settings.revision+1",
-                (json.dumps(app_data, ensure_ascii=False), now),
-            )
-            if password_format:
-                db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('web_password_format',?)", (password_format,))
-            for task in tasks:
-                db.execute(
-                    "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
-                    "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
-                    (task["task_id"], json.dumps(task, ensure_ascii=False), now),
-                )
 
     def delete_task(self, task_id: str, expected_revision=None) -> None:
         with self.connection() as db:
@@ -305,12 +297,29 @@ class Database:
                     db.execute("DELETE FROM send_intents WHERE task_id=? AND intent_key=?", (task_id, intent["intent_key"]))
             return progress
 
+    @staticmethod
+    def _delete_task_state(db, task_id, clear_dedup=False):
+        for table in ("processed_messages", "send_intents", "active_transfers", "task_progress"):
+            db.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
+        if clear_dedup:
+            db.execute("DELETE FROM dedup_records WHERE task_id=?", (task_id,))
+
+    def reset_checkpoint(self, task_id, last_message_id, forwarded_count):
+        """Replace receipts, sending state and checkpoint in one transaction."""
+        for name, value in (("last_message_id", last_message_id), ("forwarded_count", forwarded_count)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._delete_task_state(db, task_id)
+            db.execute("INSERT INTO task_progress(task_id,last_message_id,last_forward_time,forwarded_count,updated_at) VALUES(?,?,'',?,?)",
+                (task_id, last_message_id, forwarded_count, self._now()))
+        return {"task_id": task_id, "last_message_id": last_message_id,
+            "last_forward_time": "", "forwarded_count": forwarded_count}
+
     def reset_task_state(self, task_id, clear_dedup=False):
         with self.connection() as db:
-            for table in ("processed_messages", "send_intents", "active_transfers", "task_progress"):
-                db.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
-            if clear_dedup:
-                db.execute("DELETE FROM dedup_records WHERE task_id=?", (task_id,))
+            self._delete_task_state(db, task_id, clear_dedup)
 
     def get_intent(self, task_id, key):
         with self.connection() as db:

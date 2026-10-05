@@ -22,13 +22,7 @@ from tg_forwarder.runtime.service import ForwarderService
 from tg_forwarder.telegram.session_guard import session_guard
 from tg_forwarder.config.startup import StartupConfig, StartupConfigurationError
 from tg_forwarder.telegram.client import TelegramClientWrapper
-from tests.test_integrity import state
-
-VALUES = {"TG_API_ID": "12345", "TG_API_HASH": "a" * 32, "TG_PHONE": "+12345678901"}
-
-
-def startup(tmp_path, **values):
-    return StartupConfig.from_values(dict(VALUES, **values), project_root=tmp_path)
+from tests.support import VALUES, startup
 
 
 def env_file(tmp_path, **values):

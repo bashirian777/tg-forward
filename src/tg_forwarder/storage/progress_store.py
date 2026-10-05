@@ -1,5 +1,4 @@
 """Progress and live transfer state backed by SQLite."""
-import asyncio
 import time
 from typing import Dict, Optional
 
@@ -16,8 +15,6 @@ class ProgressTracker:
         self._progress: Dict[str, TaskProgress] = {}
         self._download_progress: Dict[str, dict] = {}
         self._transfer_samples: Dict[str, dict] = {}
-        self._lock = asyncio.Lock()
-        self._download_lock = asyncio.Lock()
 
     def load_progress(self) -> Dict[str, TaskProgress]:
         self._progress = {}
@@ -67,6 +64,14 @@ class ProgressTracker:
         self.db.reset_task_state(task_id, clear_dedup)
         self._progress.pop(task_id, None)
         self._download_progress.pop(task_id, None)
+
+    def replace_checkpoint(self, task_id, last_message_id, forwarded_count):
+        data = self.db.reset_checkpoint(task_id, last_message_id, forwarded_count)
+        progress = TaskProgress(**data)
+        self._progress[task_id] = progress
+        self._download_progress.pop(task_id, None)
+        self._clear_transfer_sample(task_id)
+        return progress
 
     def set_progress(self, task_id: str, last_message_id: int,
                      forwarded_count: Optional[int] = None) -> TaskProgress:
@@ -205,7 +210,6 @@ class ProgressTracker:
             "current_message_id": message_id, "file_index": file_index,
             "total_files": total_files, "speed_bps": round(speed, 1),
             "speed_str": self._format_speed(speed),
-            "forwarded_count": self.get_task_progress(task_id).forwarded_count + 1,
             "current_str": self._format_size(current), "total_str": self._format_size(total),
         })
 
@@ -218,7 +222,6 @@ class ProgressTracker:
             "total": total, "percent": int(current * 100 / total) if total else 0,
             "filename": filename, "file_index": file_index, "total_files": total_files,
             "speed_bps": round(speed, 1), "speed_str": self._format_speed(speed),
-            "forwarded_count": self.get_task_progress(task_id).forwarded_count + 1,
             "current_str": self._format_size(current), "total_str": self._format_size(total),
         })
 

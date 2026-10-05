@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "test": "playwright test",
+    "test": "playwright test && playwright test --config playwright.contract.config.ts",
     "test:browser-install": "playwright install chromium"
   },
   "dependencies": {

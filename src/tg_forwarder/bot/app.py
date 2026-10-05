@@ -269,7 +269,7 @@ class ForwarderBot(TaskWizardMixin):
     async def _do_confirm_delete(self, event, task_id: str) -> None:
         """Confirm and delete task."""
         try:
-            await self._task_manager.delete_task(task_id, delete_progress=True)
+            await self._task_manager.delete_task(task_id)
             await event.answer(f"🗑️ 任务已删除", alert=True)
             await self._handle_list(event)
         except Exception as e:

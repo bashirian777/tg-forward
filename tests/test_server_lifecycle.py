@@ -20,7 +20,7 @@ from tg_forwarder.storage.config_store import ConfigManager
 from tg_forwarder.runtime import server
 from tg_forwarder.runtime.service import ForwarderService
 from tg_forwarder import cli
-from tests.test_configuration import startup
+from tests.support import startup
 root = Path(sys.argv[1])
 cm = ConfigManager(root / "test.db", project_root=root)
 cm.initialize("密码")
@@ -49,7 +49,11 @@ cli.run()
         with selectors.DefaultSelector() as ready:
             ready.register(process.stdout, selectors.EVENT_READ)
             assert ready.select(timeout=15), "HTTP server did not bind"
-        port = int(process.stdout.readline().strip())
+        line = process.stdout.readline().strip()
+        if not line:
+            _, err = process.communicate(timeout=5)
+            raise AssertionError(f"HTTP server exited before binding (exit {process.returncode}):\n{err}")
+        port = int(line)
         base = f"http://127.0.0.1:{port}"
         with urllib.request.urlopen(base + "/tasks", timeout=5) as response:
             assert b"/assets/" in response.read()

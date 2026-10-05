@@ -61,7 +61,7 @@ async def run_login(startup, relogin):
 
 
 async def run_forwarding(startup, manager, tracker, task_id):
-    client = create_user_client(startup)
+    client = create_user_client(startup, database=manager.db)
     tasks = TaskManager(client, manager, tracker, temp_dir=manager.get_config().temp_dir)
     try:
         await connect_user(client, startup)
@@ -160,7 +160,7 @@ async def main(argv=None):
     if args.command == "add":
         task = ForwardTask(args.task_id, args.source, args.target, args.min_delay, args.max_delay, source_topic_id=args.source_topic)
         with session_guard(startup.session_path):
-            tasks = TaskManager(create_user_client(startup), manager, tracker, temp_dir=manager.get_config().temp_dir)
+            tasks = TaskManager(create_user_client(startup, database=manager.db), manager, tracker, temp_dir=manager.get_config().temp_dir)
             tasks.create_task(task)
         print(f"Task '{task.task_id}' added")
     elif args.command == "list":
@@ -169,8 +169,8 @@ async def main(argv=None):
             print(f"[{task.task_id}] {'enabled' if task.enabled else 'disabled'}: {task.source_channel} -> {task.target_channel}, checkpoint={progress.last_message_id}, forwarded={progress.forwarded_count}")
     elif args.command == "delete":
         with session_guard(startup.session_path):
-            tasks = TaskManager(create_user_client(startup), manager, tracker, temp_dir=manager.get_config().temp_dir)
-            await tasks.delete_task(args.task_id, delete_progress=True)
+            tasks = TaskManager(create_user_client(startup, database=manager.db), manager, tracker, temp_dir=manager.get_config().temp_dir)
+            await tasks.delete_task(args.task_id)
         print(f"Task '{args.task_id}' deleted")
     else:
         with session_guard(startup.session_path):

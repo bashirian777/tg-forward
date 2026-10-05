@@ -8,8 +8,7 @@ from tg_forwarder.storage.database import Database
 from tests.http_support import http_client, login
 from tg_forwarder.forwarding.handler import MessageHandler
 from tg_forwarder.tasks.validation import validate_task
-from tests.test_integrity import state
-from tests.test_media_artwork import wrapper
+from tests.support import video, wrapper
 
 
 def test_old_sqlite_schema_migrates_and_preserves_checkpoint(tmp_path):
@@ -55,7 +54,6 @@ def test_show_source_conflicts_are_rejected(state):
 
 @pytest.mark.asyncio
 async def test_show_source_uses_native_forward(state, tmp_path):
-    from tests.test_media_artwork import video
     client = wrapper()
     client.send_existing_media = AsyncMock(return_value=True)
     handler = MessageHandler(client, str(tmp_path), min_free_disk_mb=0)
@@ -67,9 +65,8 @@ async def test_show_source_uses_native_forward(state, tmp_path):
 @pytest.mark.asyncio
 async def test_expired_document_refreshes_same_media(state, tmp_path, monkeypatch):
     from telethon.errors import FileReferenceExpiredError
-    from tests.test_media_artwork import video
     from tg_forwarder.telegram.transfer import ParallelTransfer
-    client = wrapper()
+    client = wrapper(database=state[0].db)
     client.set_progress_tracker(state[1])
     original, fresh = video(), video(reference=b"fresh")
     client._client.get_messages.return_value = fresh
@@ -82,10 +79,9 @@ async def test_expired_document_refreshes_same_media(state, tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_deleted_document_during_reference_refresh_requires_operator(state, tmp_path, monkeypatch):
     from telethon.errors import FileReferenceExpiredError
-    from tests.test_media_artwork import video
     from tg_forwarder.forwarding.errors import PermanentTransferError
     from tg_forwarder.telegram.transfer import ParallelTransfer
-    client = wrapper()
+    client = wrapper(database=state[0].db)
     client.set_progress_tracker(state[1])
     client._client.get_messages.return_value = None
     download = AsyncMock(side_effect=FileReferenceExpiredError(None))

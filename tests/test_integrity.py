@@ -7,21 +7,12 @@ import pytest
 from tg_forwarder.storage.config_store import ConfigManager
 from tg_forwarder.storage.database import ConfigurationConflict
 from tg_forwarder.forwarding.engine import Forwarder
-from tg_forwarder.tasks.models import ForwardTask, ForwardResult
-from tg_forwarder.config.models import RuntimeConfig
 from tg_forwarder.storage.progress_store import ProgressTracker
+from tg_forwarder.tasks.models import ForwardResult
 from tg_forwarder.forwarding.handler import MessageHandler
 from tg_forwarder.telegram.artwork import MediaArtwork
-from tests.test_media_artwork import video, wrapper
+from tests.support import video, wrapper
 from telethon.errors import ChatForwardsRestrictedError
-
-
-@pytest.fixture
-def state(tmp_path):
-    cm = ConfigManager(str(tmp_path / "forwarder.db"), project_root=tmp_path)
-    task = ForwardTask("task", -1001111111111, -1002222222222, 0, 0)
-    cm.save_config(RuntimeConfig(tasks=[task], temp_dir=str(tmp_path / "temp")))
-    return cm, ProgressTracker(database=cm.db), task
 
 
 def test_config_operations_preserve_all_related_state(state):
@@ -30,7 +21,7 @@ def test_config_operations_preserve_all_related_state(state):
     tracker.begin_transfer("task", [101], 1)
     cm.db.add_dedup_ids("task", ["file"])
     cm.db.add_task_error("task", "test", "error")
-    cm.save_config(cm.get_config())
+    cm.save_app_config(cm.get_config())
     cm.update_task(replace(task, note="changed"))
     cm.add_task(replace(task, task_id="second"))
     cm.remove_task("second")

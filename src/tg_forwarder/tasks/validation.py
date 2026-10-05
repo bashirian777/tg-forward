@@ -27,6 +27,19 @@ def validate_task_id(task_id):
     return True, None
 
 
+def validate_source_reset(old, new, reset):
+    """Validate the state transition before changing a task's source."""
+    source_changed = old is not None and any(old.get(name) != new.get(name)
+        for name in ("source_channel", "source_topic_id"))
+    if source_changed and reset is None:
+        raise ValidationError("Changing source requires source_reset with last_message_id and clear_dedup")
+    if reset is not None:
+        if (not isinstance(reset, dict) or type(reset.get("last_message_id")) is not int
+                or reset["last_message_id"] < 0 or type(reset.get("clear_dedup")) is not bool):
+            raise ValidationError("source_reset requires a nonnegative last_message_id and boolean clear_dedup")
+    return source_changed
+
+
 def validate_task(task):
     for valid, error in (validate_task_id(task.task_id), validate_channel_id(task.source_channel),
                          validate_channel_id(task.target_channel), validate_delay_range(task.min_delay, task.max_delay)):

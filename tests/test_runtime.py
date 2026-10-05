@@ -8,8 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tg_forwarder.runtime.bridge import RuntimeBridge
-from tests.test_controls import manager
-from tests.test_integrity import state
+from tests.support import manager
 
 
 from tg_forwarder.storage.passwords import verify_password

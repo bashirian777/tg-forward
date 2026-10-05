@@ -1,9 +1,6 @@
 """Management operations execute only in the forwarding event loop."""
-import os
-import shutil
 import time
 
-from tg_forwarder.storage.workspace import WorkspaceStore
 from tg_forwarder.tasks.models import ForwardTask
 
 
@@ -27,17 +24,7 @@ class ManagementOperations:
             raise ValueError("任务字段缺失或包含未知字段") from error
 
     def system(self):
-        config = self.manager.config_manager.get_config()
-        root = shutil.disk_usage("/")
-        exists = os.path.isdir(config.temp_dir)
-        temp = shutil.disk_usage(config.temp_dir) if exists else None
-        def disk(usage):
-            return {"total": usage.total, "used": usage.used, "free": usage.free,
-                "percent": round(usage.used * 100 / usage.total, 1)} if usage else None
-        return {"disk": disk(root), "temp_disk": disk(temp), "temp_dir": config.temp_dir,
-            "temp_exists": exists, "temp_files": WorkspaceStore(config.temp_dir).stats(),
-            "uptime_seconds": int(time.monotonic() - self.started_at),
-            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else []}
+        return self.manager.system_snapshot(self.started_at)
 
     async def invoke(self, operation, params):
         manager = self.manager
@@ -59,17 +46,15 @@ class ManagementOperations:
         if operation == "system":
             return self.system()
         if operation == "logs":
-            return manager.config_manager.db.list_logs(params.get("limit", 100))
+            return manager.get_logs(params.get("limit", 100))
         if operation == "progress":
-            return manager.progress_tracker.get_task_progress(task_id).to_dict()
+            return manager.progress_snapshot(task_id)
         if operation == "dedup":
-            return {"stats": manager.get_dedup_stats(task_id),
-                "records": manager.config_manager.db.list_dedup(task_id, params.get("limit", 500))}
+            return manager.dedup_snapshot(task_id, params.get("limit", 500))
         if operation == "errors":
-            return {"summary": manager.get_task_error_summary(task_id),
-                "errors": manager.get_task_errors(task_id, params.get("limit", 100))}
+            return manager.errors_snapshot(task_id, params.get("limit", 100))
         if operation == "transfers":
-            return manager.progress_tracker.get_all_transfers()
+            return manager.get_all_transfers()
         if operation == "task.create":
             task = self.task_from_data(params["data"])
             manager.create_task(task)
@@ -87,7 +72,7 @@ class ManagementOperations:
                 raise ValueError("不支持的任务操作")
             await getattr(manager, action + "_task")(task_id)
         elif operation == "task.delete":
-            await manager.delete_task(task_id, delete_progress=True)
+            await manager.delete_task(task_id)
         elif operation in {"progress.set", "progress.reset"}:
             data = params.get("data", {})
             progress = await manager.edit_progress(task_id,

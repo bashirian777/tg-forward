@@ -3,6 +3,8 @@ import { computed, reactive, ref, watch, toRaw } from 'vue'
 import { api, ApiError } from '../../api/client'
 import { useData } from '../../stores/data'
 import { useUI } from '../../stores/ui'
+import FieldConflicts from '../common/FieldConflicts.vue'
+import { mergeFields, type FieldConflict } from '../../mergeFields'
 import Modal from '../common/Modal.vue'
 import type { TaskConfig, TaskSnapshot } from '../../types/api'
 const props = defineProps<{ task?: TaskSnapshot }>(), emit = defineEmits<{ close: [] }>()
@@ -11,14 +13,17 @@ const defaults: TaskConfig = { task_id: '', source_channel: 0, target_channel: 0
  enabled: true, note: '', hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: [],
  target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false }
 const form = reactive<TaskConfig>(structuredClone(toRaw(props.task?.config || defaults)))
-const original = ref(props.task?.config), revision = ref(props.task?.revision || 0)
+const original = ref<TaskConfig | undefined>(props.task ? structuredClone(toRaw(props.task.config)) : undefined), revision = ref(props.task?.revision || 0)
+const fieldConflicts = ref<FieldConflict[]>([])
+const unresolved = computed(() => fieldConflicts.value.some(field => !field.choice))
+let applyingMerge = false
 const keywords = ref(form.filter_keywords.join('\n')), hashtags = ref(form.required_hashtags.join('\n'))
 const startId = ref(0), clearDedup = ref(true)
 const sourceChanged = computed(() => !!original.value && (form.source_channel !== original.value.source_channel || form.source_topic_id !== original.value.source_topic_id))
 const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean)
-watch(() => form.hide_source, hide => { if (!hide) { form.caption_prefix = ''; form.remove_hashtags = false; form.send_as_channel = false } })
-watch(() => form.send_as_channel, enabled => { if (enabled) form.hide_source = true })
-watch(hashtags, text => { if (!lines(text).length) form.remove_hashtags = false })
+watch(() => form.hide_source, hide => { if (!applyingMerge && !hide) { form.caption_prefix = ''; form.remove_hashtags = false; form.send_as_channel = false } }, { flush: 'sync' })
+watch(() => form.send_as_channel, enabled => { if (!applyingMerge && enabled) form.hide_source = true }, { flush: 'sync' })
+watch(hashtags, text => { if (!applyingMerge && !lines(text).length) form.remove_hashtags = false }, { flush: 'sync' })
 const numbers = [
  { key: 'source_channel', label: '来源频道 ID', hint: '频道或群组使用负数 ID', required: true },
  { key: 'target_channel', label: '目标频道 ID', hint: '登录账号需要具有发送权限', required: true },
@@ -33,17 +38,49 @@ const switches = [
  { key: 'deduplicate', label: '媒体 ID 去重', description: '识别同一 Telegram 媒体；重新上传的相同内容可能无法识别' },
 ] as const
 function locked(key: string) { return key === 'hide_source' && form.send_as_channel || key === 'remove_hashtags' && (!form.hide_source || !lines(hashtags.value).length) || key === 'send_as_channel' && !form.hide_source }
+const conflictLabels: Record<string, string> = {
+  ...Object.fromEntries([...numbers, ...switches].map(field => [field.key, field.label])),
+  task_id: '任务 ID', note: '任务名称 / 备注', source_topic_id: '来源话题 ID', target_topic_id: '目标话题 ID',
+  caption_prefix: '描述前缀', filter_keywords: '跳过关键词', required_hashtags: '必须包含的 Hashtag',
+}
+function inputConfig(): TaskConfig { return { ...toRaw(form), filter_keywords: lines(keywords.value), required_hashtags: lines(hashtags.value) } }
+function applyConfig(config: TaskConfig) {
+  applyingMerge = true
+  try {
+    Object.assign(form, config)
+    keywords.value = config.filter_keywords.join('\n')
+    hashtags.value = config.required_hashtags.join('\n')
+  } finally { applyingMerge = false }
+}
+function resolveField(key: string, choice: 'current' | 'latest') {
+  const field = fieldConflicts.value.find(item => item.key === key)
+  if (!field) return
+  applyConfig({ ...inputConfig(), [key]: choice === 'latest' ? field.latest : field.current })
+  field.choice = choice
+}
 async function reloadRevision() {
-  if (!props.task) return
-  try { const latest = await api.task(props.task.task_id); revision.value = latest.revision; original.value = latest.config; conflict.value = false; error.value = '已读取最新版本，当前输入已保留，请核对后保存。' } catch (e) { error.value = (e as Error).message }
+  if (!props.task || !original.value || busy.value) return
+  busy.value = true
+  try {
+    const latest = await api.task(props.task.task_id)
+    const result = mergeFields(original.value, inputConfig(), latest.config)
+    applyConfig(result.merged)
+    fieldConflicts.value = result.conflicts
+    revision.value = latest.revision
+    original.value = structuredClone(latest.config)
+    conflict.value = false
+    error.value = result.conflicts.length ? '已读取最新版本，请解决字段冲突后保存。' : '已合并最新版本，当前修改已保留，请核对后保存。'
+  } catch (e) { error.value = (e as Error).message }
+  finally { busy.value = false }
 }
 async function submit() {
-  error.value = ''; conflict.value = false
+  if (busy.value || conflict.value || unresolved.value) return
+  error.value = ''
   if (!/^[A-Za-z0-9_-]{1,48}$/.test(form.task_id)) { error.value = '任务 ID 仅允许 1–48 位字母、数字、下划线和短横线'; return }
   if (![form.source_channel, form.target_channel].every(value => Number.isSafeInteger(value) && value < 0)) { error.value = '来源和目标频道 ID 必须是负整数'; return }
   if (form.source_channel === form.target_channel) { error.value = '来源与目标频道不能相同'; return }
   if (form.min_delay > form.max_delay) { error.value = '最小延迟不能大于最大延迟'; return }
-  const payload = { ...form, filter_keywords: lines(keywords.value), required_hashtags: lines(hashtags.value) }
+  const payload = inputConfig()
   let source_reset: { last_message_id: number; clear_dedup: boolean } | undefined
   if (sourceChanged.value) {
     if (!await ui.confirm('更换来源', '将清理旧传输，使用新起点和所选去重设置，确认更换来源？')) return
@@ -60,6 +97,7 @@ async function submit() {
 <template>
   <Modal id="task-modal" :title="task ? '编辑任务' : '新建任务'" :subtitle="task ? '修改配置前需先停止任务' : '创建后即可在列表中启动'" :busy="busy" @close="emit('close')">
     <form id="task-form" @submit.prevent="submit">
+      <fieldset :disabled="busy" class="form-body">
       <fieldset class="form-section"><legend>基本信息</legend><div class="form-grid">
         <div class="form-field"><label for="task-form-id">任务 ID</label><input id="task-form-id" v-model.trim="form.task_id" :disabled="!!task || busy" required maxlength="48" placeholder="例如 daily_forward" /><span class="hint">字母、数字、下划线和短横线</span></div>
         <div class="form-field"><label for="task-form-note">任务名称 / 备注</label><input id="task-form-note" v-model.trim="form.note" maxlength="120" placeholder="一个便于识别的名称" /></div>
@@ -79,8 +117,10 @@ async function submit() {
         <label v-for="item in switches" :key="item.key" class="switch" :class="{ locked: locked(item.key) }"><input :id="'task-form-' + item.key" v-model="form[item.key]" type="checkbox" :disabled="locked(item.key)" /><span class="track"></span><span class="copy"><span class="title">{{ item.label }}</span><span class="desc">{{ item.description }}</span></span></label>
       </div></fieldset>
       <fieldset v-if="sourceChanged" id="source-reset-options" class="form-section"><legend>来源变更</legend><div class="form-grid"><div class="form-field"><label for="source-reset-id">新来源起始消息 ID</label><input id="source-reset-id" v-model.number="startId" type="number" min="0" step="1" required /></div><label><input id="source-reset-dedup" v-model="clearDedup" type="checkbox" />清空旧来源的去重记录</label></div></fieldset>
-      <p class="modal-error" id="task-form-error" role="alert">{{ error }}</p><button v-if="conflict" type="button" class="btn" @click="reloadRevision">读取最新版本并保留输入</button>
-      <div class="modal-actions"><button type="button" class="btn ghost" :disabled="busy" @click="emit('close')">取消</button><button id="task-submit" class="btn primary" :class="{ busy }" :disabled="busy">保存任务</button></div>
+      </fieldset>
+      <FieldConflicts :conflicts="fieldConflicts" :labels="conflictLabels" :busy="busy" @resolve="resolveField" />
+      <p class="modal-error" id="task-form-error" role="alert">{{ error }}</p><button v-if="conflict" type="button" class="btn" :disabled="busy" @click="reloadRevision">读取最新版本并保留输入</button>
+      <div class="modal-actions"><button type="button" class="btn ghost" :disabled="busy" @click="emit('close')">取消</button><button id="task-submit" class="btn primary" :class="{ busy }" :disabled="busy || conflict || unresolved">保存任务</button></div>
     </form>
   </Modal>
 </template>

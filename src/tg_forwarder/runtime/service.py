@@ -6,14 +6,21 @@ from tg_forwarder.bot.app import ForwarderBot
 from tg_forwarder.tasks.manager import TaskManager
 from tg_forwarder.telegram.client import TelegramClientWrapper, TelegramSessionError
 from tg_forwarder.web.auth import AuthSessions
+from tg_forwarder.telegram.sender import ReliableSender
+from tg_forwarder.telegram.transfer import ParallelTransfer
 from .operations import ManagementOperations
 
 logger = logging.getLogger(__name__)
 
 
-def create_user_client(startup):
+def create_user_client(startup, *, database=None):
+    """Compose optional reliable transports explicitly, before connecting."""
     return TelegramClientWrapper(startup.api_id, startup.api_hash,
-        session_name=str(startup.session_path), proxy=startup.proxy)
+        session_name=str(startup.session_path), proxy=startup.proxy,
+        sender_factory=(lambda client: ReliableSender(client, database)) if database is not None else None,
+        transfer_factory=ParallelTransfer if database is not None else None,
+        metrics_callback=(lambda task_id, data: database.log_operation("transfer_metrics",
+            task_id=task_id, after_data=data)) if database is not None else None)
 
 
 async def connect_user(client, startup):
@@ -27,7 +34,7 @@ async def connect_user(client, startup):
 class ForwarderService:
     def __init__(self, startup, config_manager, progress_tracker):
         self.startup = startup
-        self.client = create_user_client(startup)
+        self.client = create_user_client(startup, database=config_manager.db)
         self.task_manager = TaskManager(self.client, config_manager, progress_tracker,
             temp_dir=config_manager.get_config().temp_dir)
         self.bot = ForwarderBot(startup, self.task_manager) if startup.bot_token else None

@@ -18,7 +18,6 @@ from .errors import is_permanent_error
 from tg_forwarder.storage.workspace import WorkspaceStore, atomic_json
 from tg_forwarder.telegram.transfer import load_manifest
 from tg_forwarder.telegram.sender import encode_media, decode_media
-from tg_forwarder.storage.database import Database
 from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError
 
 COPY_FALLBACK_ERRORS = (ChatForwardsRestrictedError, FileReferenceExpiredError, FilerefUpgradeNeededError)
@@ -43,13 +42,15 @@ class MessageHandler:
 
     def __init__(self, client: TelegramClientWrapper, temp_dir: str = "temp",
                  dedup_tracker: DedupTracker = None,
-                 min_free_disk_mb: int = 1024):
+                 min_free_disk_mb: int = 1024, *, progress_tracker=None,
+                 workspace_store: WorkspaceStore = None):
         self.client = client
         self.temp_dir = temp_dir
         self.dedup_tracker = dedup_tracker
-        self.progress_tracker = getattr(client, "_progress_tracker", None)
+        self.progress_tracker = progress_tracker
         self.min_free_disk_mb = max(0, int(min_free_disk_mb))
-        self.workspaces = WorkspaceStore(temp_dir)
+        self.workspaces = workspace_store or WorkspaceStore(temp_dir)
+        self._retain_transfers = workspace_store is not None
         self._managed = False
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -206,7 +207,7 @@ class MessageHandler:
 
     async def forward_message_group(self, messages, source_channel, target_channel, **kwargs):
         task_id = kwargs.get("task_id")
-        if not task_id or not isinstance(getattr(self.progress_tracker, "db", None), Database):
+        if not task_id or not self._retain_transfers:
             return await self._forward_message_group(messages, source_channel, target_channel, **kwargs)
         original = self.temp_dir
         path = self.workspaces.open(task_id, source_channel, [m.id for m in messages])
@@ -350,16 +351,6 @@ class MessageHandler:
             if caption and hashtags_to_remove:
                 caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
-            # Send as album (with reply_to for topic support)
-            send_kwargs = {
-                "caption": caption
-            }
-            if target_topic_id:
-                send_kwargs["reply_to"] = target_topic_id
-            if send_as:
-                send_as_entity = await self.client.get_entity(send_as)
-                send_kwargs["send_as"] = send_as_entity
-
             await self.client.send_existing_media(target_entity, media_list, task_id=task_id,
                 message_ids=[m.id for m in messages], caption=caption, reply_to=target_topic_id, send_as=send_as)
             logger.info(f"Sent album with {len(media_list)} items" + (f" to topic {target_topic_id}" if target_topic_id else "") + (f" as channel" if send_as else ""))
@@ -401,12 +392,6 @@ class MessageHandler:
 
             media_messages = [m for m in messages if self.is_media_message(m)]
             total_files = len(media_messages)
-            if task_id:
-                self.progress_tracker.begin_transfer(
-                    task_id,
-                    [m.id for m in media_messages],
-                    total_files
-                )
 
             # Keep only the current source file on disk. Telegram retains the
             # uploaded handle, which lets the final request remain one album.
@@ -442,7 +427,8 @@ class MessageHandler:
                     task_id=task_id,
                     file_index=index,
                     total_files=total_files,
-                    cleanup_after_upload=True,
+                    cleanup_after_upload=not self._managed,
+                    persist_media=self._managed,
                     message_id=msg.id
                 )
                 uploaded_media.append(media)
@@ -466,8 +452,6 @@ class MessageHandler:
             )
             if not sent:
                 raise RuntimeError("Telegram did not confirm the album send")
-            if task_id:
-                self.progress_tracker.clear_transfer(task_id)
 
             logger.info(f"Downloaded and sent album with {len(uploaded_media)} items" + (f" to topic {target_topic_id}" if target_topic_id else "") + (f" as channel" if send_as else ""))
             return ForwardResult(success=True, method="download_album")
@@ -530,15 +514,6 @@ class MessageHandler:
             if caption and hashtags_to_remove:
                 caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
-            send_kwargs = {
-                "caption": caption if caption else None
-            }
-            if target_topic_id:
-                send_kwargs["reply_to"] = target_topic_id
-            if send_as:
-                send_as_entity = await self.client.get_entity(send_as)
-                send_kwargs["send_as"] = send_as_entity
-
             await self.client.send_existing_media(target_entity, self.client.input_media_with_cover(message),
                 task_id=task_id, message_ids=[message.id], caption=caption, reply_to=target_topic_id, send_as=send_as)
             return True
@@ -584,7 +559,7 @@ class MessageHandler:
                     entity = await self.client.get_entity(target_channel)
                     media = await self.client.upload_media_for_album(file_path, attributes=attributes,
                         thumb=artwork.thumb, cover=artwork.cover, task_id=task_id, message_id=message.id,
-                        cleanup_after_upload=False, entity=entity)
+                        cleanup_after_upload=False, persist_media=True, entity=entity)
                     self._save_uploaded(message, target_channel, media)
                     self._cleanup_file(file_path)
                     success = await self.client.send_existing_media(entity, media, task_id=task_id,
@@ -594,8 +569,6 @@ class MessageHandler:
                         target_channel, file_path, caption=caption if caption else None,
                         attributes=attributes, thumb=artwork.thumb, cover=artwork.cover,
                         task_id=task_id, reply_to=target_topic_id, send_as=send_as, message_id=message.id)
-                if success and task_id and self.progress_tracker:
-                    self.progress_tracker.clear_transfer(task_id)
                 return success
             return False
         except FloodWaitError:

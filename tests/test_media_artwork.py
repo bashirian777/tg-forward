@@ -15,34 +15,7 @@ from tg_forwarder.telegram.client import TelegramClientWrapper
 from tg_forwarder.runtime.cleanup import cleanup_temp_dir
 
 
-def jpeg(width=640, height=480):
-    output = io.BytesIO()
-    Image.new("RGB", (width, height), "blue").save(output, "JPEG")
-    return output.getvalue()
-
-
-def video(message_id=10, reference=b"old", cover=False, thumbs=None):
-    document = types.Document(
-        id=100 + message_id, access_hash=1, file_reference=reference, date=None,
-        mime_type="video/mp4", size=1000, dc_id=2,
-        attributes=[types.DocumentAttributeVideo(duration=5, w=640, h=480)],
-        thumbs=thumbs if thumbs is not None else [types.PhotoSize("m", 320, 240, 1000)],
-    )
-    photo = types.Photo(
-        id=300, access_hash=2, file_reference=reference, date=None,
-        sizes=[types.PhotoSize("x", 800, 600, 5000)], dc_id=2,
-    ) if cover else None
-    return SimpleNamespace(
-        id=message_id, input_chat=types.InputPeerChannel(123, 1), chat_id=-100123,
-        media=types.MessageMediaDocument(document=document, video_cover=photo),
-        text="caption", message="caption",
-    )
-
-
-def wrapper():
-    client = TelegramClientWrapper(1, "hash")
-    client._client = AsyncMock()
-    return client
+from tests.support import jpeg, video, wrapper
 
 
 def test_thumbnail_is_small_valid_jpeg_even_for_noisy_image():

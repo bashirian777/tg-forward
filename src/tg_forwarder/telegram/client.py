@@ -14,13 +14,9 @@ from telethon.errors import (
 )
 
 from .artwork import MediaArtwork, artwork_sizes, normalize_artwork
-from tg_forwarder.forwarding.errors import is_permanent_error, PermanentTransferError
+from .errors import is_permanent_error, PermanentTransferError
 from tg_forwarder.tasks.errors import RuntimeUnavailable
-from tg_forwarder.storage.database import Database
 from tg_forwarder.config.paths import DEFAULT_SESSION_PATH, PROJECT_ROOT
-from .sender import ReliableSender
-from .transfer import ParallelTransfer
-from tg_forwarder.storage.workspace import OWNER_FILE
 from pathlib import Path
 
 
@@ -48,13 +44,17 @@ class TelegramClientWrapper:
     """Wrapper around Telethon client for Telegram operations."""
 
     def __init__(self, api_id: int, api_hash: str, session_name: str = str(PROJECT_ROOT / DEFAULT_SESSION_PATH),
-                 proxy: dict = None):
+                 proxy: dict = None, *, sender_factory=None, transfer_factory=None,
+                 metrics_callback=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_name = session_name
         self.proxy = proxy  # {"proxy_type": "socks5", "addr": "127.0.0.1", "port": 1080}
         self._client: Optional[TelegramClient] = None
-        self._progress_tracker = None  # Will be set externally
+        self._progress_tracker = None  # Telemetry only; it never selects a transport.
+        self.sender_factory = sender_factory
+        self.transfer_factory = transfer_factory
+        self.metrics_callback = metrics_callback
         self.download_workers = 4
         self.upload_workers = 4
         self.connection_status = {"state": "disconnected", "message": "Telegram 尚未连接"}
@@ -194,9 +194,10 @@ class TelegramClientWrapper:
 
     async def send_existing_media(self, entity, media, *, task_id=None, message_ids=None, caption=None, reply_to=None, send_as=None, source=None):
         tracker = self._progress_tracker
-        if tracker and task_id and isinstance(getattr(tracker, "db", None), Database):
-            tracker.update_transfer(task_id, {"state": "sending", "speed_str": "等待 Telegram 确认"})
-            return await ReliableSender(self._client, tracker.db).send(
+        if self.sender_factory is not None and task_id:
+            if tracker:
+                tracker.update_transfer(task_id, {"state": "sending", "speed_str": "等待 Telegram 确认"})
+            return await self.sender_factory(self._client).send(
                 entity, media, task_id=task_id, message_ids=message_ids,
                 caption=caption, reply_to=reply_to, send_as=send_as, source=source)
         if source:
@@ -278,10 +279,10 @@ class TelegramClientWrapper:
         started = time.monotonic()
         try:
             document = getattr(message.media, "document", None)
-            if document and isinstance(getattr(tracker, "db", None), Database):
+            if document and self.transfer_factory is not None:
                 for attempt in range(2):
                     try:
-                        file_path = await ParallelTransfer(self._client, self.download_workers, self.upload_workers).download(message, destination, progress_callback)
+                        file_path = await self.transfer_factory(self._client, self.download_workers, self.upload_workers).download(message, destination, progress_callback)
                         break
                     except (FileReferenceExpiredError, FilerefUpgradeNeededError) as error:
                         if attempt:
@@ -304,9 +305,10 @@ class TelegramClientWrapper:
                         break
             else:
                 file_path = await self._client.download_media(message, file=destination, progress_callback=progress_callback)
-            if tracker and task_id and isinstance(getattr(tracker, "db", None), Database):
+            if self.metrics_callback is not None and task_id:
                 elapsed = time.monotonic() - started
-                tracker.db.log_operation("transfer_metrics", task_id=task_id, after_data={"stage": "download", "bytes": total_size, "seconds": round(elapsed, 3), "workers": self.download_workers})
+                self.metrics_callback(task_id, {"stage": "download", "bytes": total_size,
+                    "seconds": round(elapsed, 3), "workers": self.download_workers})
         except FloodWaitError:
             raise
         except Exception as error:
@@ -377,31 +379,6 @@ class TelegramClientWrapper:
         try:
             entity = await self.get_entity(channel_id)
 
-            last_update = [0]
-
-            def upload_progress(current: int, total: int):
-                """Update upload progress every 10 seconds."""
-                now = time.time()
-                if now - last_update[0] >= 10 or current == total:
-                    last_update[0] = now
-                    if tracker and task_id:
-                        tracker.update_upload_progress(
-                            task_id, current, total, filename
-                        )
-
-            send_kwargs = {
-                "caption": caption,
-                "attributes": attributes,
-                "thumb": thumb,
-                "progress_callback": upload_progress,
-                "supports_streaming": True
-            }
-            if reply_to:
-                send_kwargs["reply_to"] = reply_to
-            if send_as:
-                send_as_entity = await self.get_entity(send_as)
-                send_kwargs["send_as"] = send_as_entity
-
             media = await self.upload_media_for_album(
                 file_path, attributes=attributes, thumb=thumb, cover=cover,
                 task_id=task_id, message_id=message_id,
@@ -409,10 +386,6 @@ class TelegramClientWrapper:
             )
             await self.send_existing_media(entity, media, task_id=task_id, message_ids=[message_id],
                 caption=caption, reply_to=reply_to, send_as=send_as)
-
-            if tracker and task_id:
-                tracker.clear_upload_progress(task_id)
-
             return True
         except FloodWaitError:
             raise
@@ -534,8 +507,8 @@ class TelegramClientWrapper:
 
     async def upload_source(self, source, progress_callback=None):
         started = time.monotonic()
-        if isinstance(getattr(self._progress_tracker, "db", None), Database):
-            result = await ParallelTransfer(self._client, self.download_workers, self.upload_workers).upload(source, progress_callback)
+        if self.transfer_factory is not None:
+            result = await self.transfer_factory(self._client, self.download_workers, self.upload_workers).upload(source, progress_callback)
             logger.info("Upload %s bytes in %.2fs (%s workers)", os.path.getsize(source), time.monotonic() - started, self.upload_workers)
             return result
         kwargs = {"progress_callback": progress_callback} if progress_callback else {}
@@ -557,8 +530,9 @@ class TelegramClientWrapper:
                                       cleanup_after_upload: bool = True,
                                       message_id: int = None,
                                       cover: str = None,
-                                      entity=None):
-        """Upload one album item and optionally remove its source files."""
+                                      entity=None,
+                                      persist_media: bool = False):
+        """Upload an item; callers explicitly own cleanup and reusable handles."""
         from telethon.tl.types import (
             InputMediaUploadedDocument, InputMediaUploadedPhoto,
             DocumentAttributeFilename
@@ -568,9 +542,6 @@ class TelegramClientWrapper:
         last_update = [0]
         tracker = self._progress_tracker
         filename = _media_filename(attributes, os.path.basename(file_path))
-        if (Path(file_path).parent / OWNER_FILE).exists():
-            # The handler deletes sources only after persisting the reusable media.
-            cleanup_after_upload = False
 
         def upload_progress(current: int, total: int):
             now = time.time()
@@ -601,7 +572,7 @@ class TelegramClientWrapper:
 
             if is_photo and not attributes:
                 media = InputMediaUploadedPhoto(file=uploaded_file)
-                if (Path(file_path).parent / OWNER_FILE).exists():
+                if persist_media:
                     result = await self._client(functions.messages.UploadMediaRequest(entity, media))
                     return utils.get_input_media(result.photo)
                 return media
@@ -625,7 +596,7 @@ class TelegramClientWrapper:
                 video_cover=uploaded_cover,
                 force_file=False
             )
-            if (Path(file_path).parent / OWNER_FILE).exists():
+            if persist_media:
                 result = await self._client(functions.messages.UploadMediaRequest(entity, media))
                 converted = utils.get_input_media(result.document)
                 converted.video_cover = media.video_cover
@@ -652,16 +623,6 @@ class TelegramClientWrapper:
                                   message_ids: list = None) -> bool:
         """Send already-uploaded Telegram media as one album."""
         try:
-            send_kwargs = {
-                "caption": caption,
-                "supports_streaming": True
-            }
-            if reply_to:
-                send_kwargs["reply_to"] = reply_to
-            if send_as:
-                send_as_entity = await self.get_entity(send_as)
-                send_kwargs["send_as"] = send_as_entity
-
             # Telethon's album conversion drops video_cover. Convert explicitly
             # and restore it on InputMediaDocument before passing the album on.
             prepared_media = []
@@ -676,8 +637,6 @@ class TelegramClientWrapper:
                     prepared_media.append(media)
             await self.send_existing_media(entity, prepared_media, task_id=task_id,
                 message_ids=message_ids, caption=caption, reply_to=reply_to, send_as=send_as)
-            if self._progress_tracker and task_id:
-                self._progress_tracker.clear_upload_progress(task_id)
             return True
         except FloodWaitError:
             raise

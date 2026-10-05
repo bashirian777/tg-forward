@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 from tg_forwarder.runtime.bridge import RuntimeBridge
 from tg_forwarder.runtime.service import ForwarderService
 from tg_forwarder.web.app import create_app
-from tests.test_configuration import startup
+from tests.support import startup
 
 
 @contextmanager

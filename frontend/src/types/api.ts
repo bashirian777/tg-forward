@@ -20,6 +20,7 @@ export interface RuntimeConfig {
   web_password_configured: boolean; max_concurrent_tasks: number; min_free_disk_mb: number;
   download_workers: number; upload_workers: number;
 }
+export type RuntimeConfigUpdate = Omit<RuntimeConfig, 'web_password_configured'> & { web_password?: string }
 export interface Deployment {
   services: Record<string, { state: string; message: string }>;
   fields: Record<string, { configured?: boolean; value?: string | number | number[]; source: string }>;

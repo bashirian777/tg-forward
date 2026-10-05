@@ -2,7 +2,6 @@
 import logging
 import asyncio
 from functools import wraps
-from copy import deepcopy
 from typing import Dict, List, Optional
 
 from tg_forwarder.telegram.client import TelegramClientWrapper
@@ -12,8 +11,9 @@ from tg_forwarder.storage.config_store import ConfigManager
 from tg_forwarder.forwarding.engine import Forwarder
 from tg_forwarder.storage.dedup_store import DedupTracker
 from .models import ForwardTask, TaskStatus, TaskProgress
-from .validation import validate_task
-from tg_forwarder.config.validation import validate_runtime_config
+from .validation import validate_task, validate_source_reset
+from .settings import RuntimeSettings
+from .queries import ManagementQueries
 from .errors import OperationError, TaskNotFound
 from tg_forwarder.storage.workspace import WorkspaceStore
 
@@ -61,6 +61,9 @@ class TaskManager:
         self._statuses: Dict[str, str] = {}  # task_id -> status
         self._operation_locks = {}
         self._settings_lock = asyncio.Lock()
+        self._settings = RuntimeSettings(config_manager)
+        self._queries = ManagementQueries(config_manager, progress_tracker,
+            self.get_task_status, self._dedup_trackers, self._settings)
 
     def require_task(self, task_id):
         task = self.config_manager.get_task(task_id)
@@ -81,47 +84,23 @@ class TaskManager:
         self.config_manager.db.log_operation("create_task", task_id=task.task_id, after_data=task.to_dict())
 
     def task_snapshot(self, task_id):
-        self.require_task(task_id)
-        status = self.get_task_status(task_id)
-        return deepcopy(dict(status.to_dict(),
-            transfer=self.get_transfer(task_id), dedup=self.get_dedup_stats(task_id),
-            errors=self.get_task_error_summary(task_id),
-            revision=self.config_manager.task_revision(task_id)))
+        return self._queries.task_snapshot(task_id)
 
     def task_snapshots(self):
-        return [self.task_snapshot(task.task_id) for task in self.list_tasks()]
+        return self._queries.task_snapshots()
 
     def config_snapshot(self):
-        config = self.config_manager.get_config()
-        values = config.settings_dict()
-        values.pop("web_password", None)
-        return dict(values, revision=self.config_manager.revision,
-            web_password_configured=bool(config.web_password), storage_source="SQLite")
+        return self._queries.config_snapshot()
 
     async def update_settings(self, data):
         async with self._settings_lock:
-            current = self.config_manager.get_config()
-            candidate = deepcopy(current)
-            allowed = candidate.setting_names()
-            if set(data) - allowed - {"revision"}:
-                raise ValueError("包含不支持的运行设置")
-            for name in allowed & data.keys():
-                if name == "web_password":
-                    if not isinstance(data[name], str):
-                        raise ValueError("管理密码必须是文字")
-                    if not data[name]:
-                        continue
-                setattr(candidate, name, data[name])
-            validate_runtime_config(candidate, self.config_manager.project_root)
-            runtime_keys = allowed - {"web_password", "web_auth_ttl_hours"}
-            changed = any(getattr(candidate, key) != getattr(current, key) for key in runtime_keys)
+            candidate, changed = self._settings.prepare_update(data)
             if changed and self.has_running_tasks():
                 raise OperationError("stop_all_tasks_before_editing_config", "请先停止全部任务再修改传输参数")
-            self.config_manager.save_app_config(candidate, data.get("revision"))
+            self._settings.persist(candidate, data.get("revision"))
             if changed:
                 self.refresh_runtime_limits()
-            self.config_manager.db.log_operation("update_app_config", after_data={
-                key: getattr(candidate, key) for key in runtime_keys | {"web_auth_ttl_hours"}})
+            self._settings.log_update(candidate)
             return self.config_snapshot()
 
     async def reload_runtime(self):
@@ -174,7 +153,9 @@ class TaskManager:
             self.client,
             self.temp_dir,
             dedup_tracker=dedup_tracker,
-            min_free_disk_mb=self.min_free_disk_mb
+            min_free_disk_mb=self.min_free_disk_mb,
+            progress_tracker=self.progress_tracker,
+            workspace_store=WorkspaceStore(self.temp_dir)
         )
         forwarder = Forwarder(
             self.client,
@@ -270,11 +251,7 @@ class TaskManager:
 
     def list_tasks(self) -> List[TaskStatus]:
         """List all tasks with their status."""
-        config = self.config_manager.get_config()
-        if config is None:
-            return []
-
-        return [self.get_task_status(task.task_id) for task in config.tasks]
+        return self._queries.list_tasks()
 
     def has_running_tasks(self) -> bool:
         return any(task and not task.done() for task in self._tasks.values())
@@ -296,12 +273,9 @@ class TaskManager:
         if task.task_id in self._tasks and not self._tasks[task.task_id].done():
             raise OperationError("task_active", "Stop the task before editing its configuration", 409)
         old = self.require_task(task.task_id)
-        source_changed = old and (old.source_channel, old.source_topic_id) != (task.source_channel, task.source_topic_id)
-        if source_changed and (not isinstance(source_reset, dict) or "last_message_id" not in source_reset or type(source_reset.get("clear_dedup")) is not bool):
-            raise ValueError("Changing source requires source_reset with last_message_id and clear_dedup")
-        if source_changed:
-            if type(source_reset["last_message_id"]) is not int or source_reset["last_message_id"] < 0:
-                raise ValueError("New source checkpoint must be a nonnegative integer")
+        # A stale form must reload before source-change semantics are evaluated.
+        self.config_manager.check_task_revision(task.task_id, expected_revision)
+        source_changed = validate_source_reset(old.to_dict(), task.to_dict(), source_reset)
         self.config_manager.update_task(task, expected_revision, source_reset if source_changed else None)
         if source_changed:
             self.cleanup_files(task.task_id)
@@ -322,15 +296,32 @@ class TaskManager:
         if forwarded_count is not None and (type(forwarded_count) is not int or forwarded_count < 0):
             raise ValueError("Forwarded count must be a nonnegative integer")
         count = self.progress_tracker.get_task_progress(task_id).forwarded_count if forwarded_count is None else forwarded_count
-        self.progress_tracker.reset_task_state(task_id)
-        progress = self.progress_tracker.set_progress(task_id, last_message_id, count)
+        progress = self.progress_tracker.replace_checkpoint(task_id, last_message_id, count)
         self.config_manager.db.log_operation(
             "set_progress", task_id=task_id, after_data=progress.to_dict()
         )
         return progress
 
     def get_transfer(self, task_id: str) -> Optional[dict]:
-        return self.progress_tracker.get_transfer(task_id)
+        return self._queries.get_transfer(task_id)
+
+    def get_all_transfers(self):
+        return self._queries.get_all_transfers()
+
+    def progress_snapshot(self, task_id):
+        return self._queries.progress_snapshot(task_id)
+
+    def dedup_snapshot(self, task_id, limit=500):
+        return self._queries.dedup_snapshot(task_id, limit)
+
+    def errors_snapshot(self, task_id, limit=100):
+        return self._queries.errors_snapshot(task_id, limit)
+
+    def get_logs(self, limit=100):
+        return self._queries.get_logs(limit)
+
+    def system_snapshot(self, started_at):
+        return self._queries.system_snapshot(started_at)
 
     def cleanup_files(self, task_id=None, expired_only=False):
         config = self.config_manager.get_config()
@@ -417,15 +408,7 @@ class TaskManager:
 
 
     def get_dedup_stats(self, task_id: str) -> dict:
-        tracker = self._dedup_trackers.get(task_id)
-        if tracker:
-            return tracker.get_stats()
-        return {
-            "task_id": task_id,
-            "total_tracked": self.config_manager.db.dedup_count(task_id),
-            "storage_path": self.config_manager.db.path,
-            "pending_saves": 0,
-        }
+        return self._queries.get_dedup_stats(task_id)
 
     def clear_dedup(self, task_id: str) -> None:
         if task_id in self._dedup_trackers:
@@ -435,16 +418,16 @@ class TaskManager:
         self.config_manager.db.log_operation("clear_dedup", task_id=task_id)
 
     def get_task_error_summary(self, task_id: str) -> dict:
-        return self.progress_tracker.get_task_error_summary(task_id)
+        return self._queries.get_task_error_summary(task_id)
 
     def get_task_errors(self, task_id: str, limit: int = 100) -> list:
-        return self.progress_tracker.get_task_errors(task_id, limit)
+        return self._queries.get_task_errors(task_id, limit)
 
     def clear_task_errors(self, task_id: str) -> None:
         self.progress_tracker.clear_task_errors(task_id)
 
     @serialized_action
-    async def delete_task(self, task_id: str, delete_progress: bool = False) -> None:
+    async def delete_task(self, task_id: str) -> None:
         """Stop and remove configuration, child rows, files and cached state."""
         self.require_task(task_id)
         await self._stop_task(task_id)

@@ -4,19 +4,17 @@ from unittest.mock import AsyncMock
 import pytest
 from tg_forwarder.web.auth import AuthSessions
 from tg_forwarder.storage.workspace import WorkspaceStore
-from tests.test_controls import manager
-from tests.test_media_artwork import video, wrapper
+from tests.support import manager, video, wrapper
 from telethon import types
 from telethon.errors import ChatForwardsRestrictedError
 from tg_forwarder.telegram.artwork import MediaArtwork
 from tg_forwarder.forwarding.handler import MessageHandler
-from tests.test_integrity import state
 
 
 @pytest.mark.asyncio
 async def test_managed_send_failure_reuses_upload_and_success_cleans_covers(state, tmp_path):
     cm, tracker, task = state
-    client = wrapper()
+    client = wrapper(database=tracker.db)
     client.set_progress_tracker(tracker)
     client.get_entity = AsyncMock(return_value="target")
     client.send_existing_media = AsyncMock(side_effect=[ChatForwardsRestrictedError(None), TimeoutError("lost response"), ChatForwardsRestrictedError(None), True])
@@ -33,7 +31,8 @@ async def test_managed_send_failure_reuses_upload_and_success_cleans_covers(stat
     client.download_media = AsyncMock(side_effect=download)
     uploaded = types.InputMediaDocument(types.InputDocument(1, 2, b"ref"))
     client.upload_media_for_album = AsyncMock(return_value=uploaded)
-    handler = MessageHandler(client, cm.get_config().temp_dir, min_free_disk_mb=0)
+    handler = MessageHandler(client, cm.get_config().temp_dir, min_free_disk_mb=0,
+        progress_tracker=tracker, workspace_store=WorkspaceStore(cm.get_config().temp_dir))
     source = video()
     assert not (await handler.forward_message_group([source], task.source_channel, task.target_channel, task_id=task.task_id)).success
     assert handler.workspaces.stats()["files"] >= 3  # cover, thumb and saved media reference
@@ -48,7 +47,7 @@ async def test_managed_send_failure_reuses_upload_and_success_cleans_covers(stat
 async def test_owned_failure_and_cancel_keep_files_until_explicit_cleanup(state, tmp_path, stage):
     import asyncio
     cm, tracker, task = state
-    client = wrapper()
+    client = wrapper(database=tracker.db)
     client.set_progress_tracker(tracker)
     client.get_entity = AsyncMock(return_value="target")
     async def send_existing(*args, **kwargs):
@@ -72,7 +71,8 @@ async def test_owned_failure_and_cancel_keep_files_until_explicit_cleanup(state,
     client.download_media = download
     client.upload_media_for_album = AsyncMock(side_effect=RuntimeError("upload interrupted") if stage == "upload" else None,
         return_value=types.InputMediaDocument(types.InputDocument(1, 2, b"ref")))
-    handler = MessageHandler(client, cm.get_config().temp_dir, min_free_disk_mb=0)
+    handler = MessageHandler(client, cm.get_config().temp_dir, min_free_disk_mb=0,
+        progress_tracker=tracker, workspace_store=WorkspaceStore(cm.get_config().temp_dir))
     call = handler.forward_message_group([video()], task.source_channel, task.target_channel, task_id=task.task_id)
     if stage == "cancel":
         with pytest.raises(asyncio.CancelledError):

@@ -3,19 +3,13 @@ import asyncio
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 import pytest
 from telethon import types
 from tg_forwarder.forwarding.engine import Forwarder
-from tg_forwarder.tasks.manager import TaskManager
 from tg_forwarder.telegram.sender import ReliableSender
 from tg_forwarder.tasks.validation import validate_task
-from tests.test_integrity import state
-
-
-def manager(state):
-    cm, tracker, _ = state
-    return TaskManager(SimpleNamespace(set_progress_tracker=Mock(), ensure_ready=AsyncMock()), cm, tracker, temp_dir=cm.get_config().temp_dir)
+from tests.support import manager
 
 
 @pytest.mark.asyncio
