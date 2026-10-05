@@ -160,7 +160,7 @@ class MessageHandler:
         after, after_entities = markdown.parse(text or "")
         parts, entities = [], []
         offset = 0
-        for value, formatting in ((before, before_entities), (name, []), (after, after_entities)):
+        for value, formatting in ((before, before_entities), (f"#{name}", []), (after, after_entities)):
             if not value:
                 continue
             if parts:

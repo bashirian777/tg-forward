@@ -211,7 +211,7 @@ class TaskWizardMixin:
             pending["step"] = "include_topic_name"
             await event.respond(
                 "是否在**标题携带来源话题名**？\n"
-                "有话题时按「自定义前缀 话题名 原标题」发送，不添加括号\n\n"
+                "有话题时按「自定义前缀 #话题名 原标题」发送\n\n"
                 "发送 `1` 开启\n"
                 "发送其他任意内容关闭"
             )

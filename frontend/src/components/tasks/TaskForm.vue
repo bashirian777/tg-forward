@@ -35,7 +35,7 @@ const switches = [
  { key: 'hide_source', label: '隐藏转发来源', description: '目标消息不显示“转发自”' },
  { key: 'remove_hashtags', label: '删除已匹配 Hashtag', description: '从转发描述中移除匹配的标签' },
  { key: 'send_as_channel', label: '以目标频道身份发送', description: '需要登录账号具有相应管理员权限' },
- { key: 'include_topic_name', label: '标题携带来源话题名', description: '需隐藏来源；按「自定义前缀 话题名 原标题」发送，不添加括号，无话题时保持原样' },
+ { key: 'include_topic_name', label: '标题携带来源话题名', description: '需隐藏来源；按「自定义前缀 #话题名 原标题」发送，无话题时保持原样' },
  { key: 'require_video', label: '仅转发含视频的消息', description: '跳过单张图片和纯图片组；含视频的混合媒体组整组转发' },
  { key: 'deduplicate', label: '媒体 ID 去重', description: '识别同一 Telegram 媒体；重新上传的相同内容可能无法识别' },
 ] as const

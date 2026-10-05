@@ -32,10 +32,10 @@ def make_handler(tmp_path):
 
 
 @pytest.mark.parametrize("prefix,text,expected", [
-    ("【video1】前缀", "title1", "【video1】前缀 topic1 title1"),
-    ("", "title1", "topic1 title1"),
-    ("前缀", "", "前缀 topic1"),
-    ("", "", "topic1"),
+    ("【video1】前缀", "title1", "【video1】前缀 #topic1 title1"),
+    ("", "title1", "#topic1 title1"),
+    ("前缀", "", "前缀 #topic1"),
+    ("", "", "#topic1"),
 ])
 @pytest.mark.parametrize("album", [False, True])
 async def test_topic_name_order_without_delimiters_for_single_and_album(tmp_path, prefix, text, expected, album):
@@ -62,7 +62,7 @@ async def test_literal_topic_text_preserves_prefix_and_original_formatting(tmp_p
     await handler.forward_message_group([msg], -1001, -1002, caption_prefix="**前缀😀**",
         include_topic_name=True, remove_hashtags=True, required_hashtags=["删除"])
     caption = client.send_existing_media.await_args.kwargs["caption"]
-    assert caption.text == "前缀😀 **topic** [name](https://example.test) 原文 #保留"
+    assert caption.text == "前缀😀 #**topic** [name](https://example.test) 原文 #保留"
     assert len(caption.entities) == 2
     assert all(isinstance(entity, types.MessageEntityBold) for entity in caption.entities)
     encoded = add_surrogate(caption.text)
@@ -111,7 +111,7 @@ async def test_remaining_album_media_still_get_topic_after_dedup_and_engine_pass
     engine = Forwarder(client, handler, tracker)
     engine._ordered_ids = [10, 11]
     assert await engine.process_message_group([first, second], task) == "forwarded"
-    assert client.send_existing_media.await_args.kwargs["caption"].text == "prefix topic1 caption"
+    assert client.send_existing_media.await_args.kwargs["caption"].text == "prefix #topic1 caption"
     assert client.send_existing_media.await_args.kwargs["message_ids"] == [11]
     assert tracker.get_task_progress(task.task_id).forwarded_count == 1
     client.get_source_topic_name.reset_mock()
@@ -136,7 +136,7 @@ async def test_copy_and_download_fallback_use_the_same_caption(tmp_path, album):
     assert result.success
     initial = client.send_existing_media.await_args.kwargs["caption"]
     forwarded = (client.send_uploaded_album if album else client.send_file_with_metadata).await_args.kwargs["caption"]
-    assert forwarded is initial and forwarded.text == "prefix topic1 caption"
+    assert forwarded is initial and forwarded.text == "prefix #topic1 caption"
 
 
 @pytest.mark.parametrize("reply,expected", [
