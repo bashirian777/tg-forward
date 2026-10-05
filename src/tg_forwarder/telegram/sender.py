@@ -33,6 +33,8 @@ class ReliableSender:
         items = media if isinstance(media, list) else [media]
         if not intent:
             intent = {"random_ids": [secrets.randbits(63) for _ in items], "sent": False, "message_ids": message_ids}
+            if isinstance(caption, types.TextWithEntities):
+                intent["caption"] = encode_media(caption)
             intent["updated_at"] = time.time()
             self.db.save_intent(task_id, key, intent)
         if source:
@@ -53,7 +55,10 @@ class ReliableSender:
                     prepared.append(converted)
                 else:
                     prepared.append(item)
-            text, entities = markdown.parse(caption or "")
+            if intent.get("caption"):
+                caption = decode_media(intent["caption"])
+            text, entities = ((caption.text, caption.entities) if isinstance(caption, types.TextWithEntities)
+                              else markdown.parse(caption or ""))
             reply = types.InputReplyToMessage(reply_to) if reply_to else None
             send_peer = await self.client.get_input_entity(send_as) if send_as else None
             if len(prepared) == 1:

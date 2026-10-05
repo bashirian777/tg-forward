@@ -1,16 +1,16 @@
 import { test, expect, type Page } from '@playwright/test'
-import type { RuntimeConfig, TaskSnapshot } from '../src/types/api'
+import type { RuntimeConfig, TaskSnapshot, TaskSortMode } from '../src/types/api'
 
 function fixtures(): TaskSnapshot[] {
   return [
-    { task_id: 'daily', status: 'running', revision: 2, config: { task_id: 'daily', note: '每日精选 · 视频转发', source_channel: -100111222333, target_channel: -100444555666, min_delay: 10, max_delay: 20, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: ['纪录片', '科普'], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: true }, progress: { forwarded_count: 1234, last_message_id: 8012, last_forward_time: new Date().toISOString() }, transfer: { type: 'download', state: 'downloading', filename: '地球脉动第三季·第六集：共同生存之路（4K修复版）.mp4', percent: 62.4, current: 1.2e9, total: 1.9e9, speed_bps: 8.6e6, file_index: 1, total_files: 3 }, errors: { unresolved: 0, count: 0 } },
-    { task_id: 'archive', status: 'stopped', revision: 3, config: { task_id: 'archive', note: '资料归档', source_channel: -100777888999, target_channel: -100222333444, min_delay: 5, max_delay: 15, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: ['广告'], required_hashtags: [], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false }, progress: { forwarded_count: 86, last_message_id: 402, last_forward_time: new Date(Date.now() - 7200000).toISOString() }, transfer: null, errors: { unresolved: 2, count: 2 } },
-    { task_id: 'paused', status: 'paused', revision: 1, config: { task_id: 'paused', note: '稍后继续的转发任务', source_channel: -100111, target_channel: -100222, min_delay: 10, max_delay: 20, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: [], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false }, progress: { forwarded_count: 320, last_message_id: 1040, last_forward_time: '' }, transfer: null, errors: { unresolved: 0, count: 0 } },
+    { task_id: 'daily', status: 'running', revision: 2, config: { task_id: 'daily', note: '每日精选 · 视频转发', source_channel: -100111222333, target_channel: -100444555666, min_delay: 10, max_delay: 20, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: ['纪录片', '科普'], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: true, require_video: false, include_topic_name: false }, progress: { forwarded_count: 1234, last_message_id: 8012, last_forward_time: new Date().toISOString() }, transfer: { type: 'download', state: 'downloading', filename: '地球脉动第三季·第六集：共同生存之路（4K修复版）.mp4', percent: 62.4, current: 1.2e9, total: 1.9e9, speed_bps: 8.6e6, file_index: 1, total_files: 3 }, errors: { unresolved: 0, count: 0 } },
+    { task_id: 'archive', status: 'stopped', revision: 3, config: { task_id: 'archive', note: '资料归档', source_channel: -100777888999, target_channel: -100222333444, min_delay: 5, max_delay: 15, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: ['广告'], required_hashtags: [], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false, require_video: false, include_topic_name: false }, progress: { forwarded_count: 86, last_message_id: 402, last_forward_time: new Date(Date.now() - 7200000).toISOString() }, transfer: null, errors: { unresolved: 2, count: 2 } },
+    { task_id: 'later', status: 'stopped', revision: 1, config: { task_id: 'later', note: '稍后启动的转发任务', source_channel: -100111, target_channel: -100222, min_delay: 10, max_delay: 20, enabled: true, hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: [], target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false, require_video: false, include_topic_name: false }, progress: { forwarded_count: 320, last_message_id: 1040, last_forward_time: '' }, transfer: null, errors: { unresolved: 0, count: 0 } },
   ]
 }
 async function setup(page: Page) {
   const tasks = fixtures(), writes: { path: string; method: string; body: any }[] = []
-  const control = { expired: false, failTasks: false, delayAction: false, actionCount: 0 }
+  const control = { expired: false, failTasks: false, delayAction: false, actionCount: 0, sortMode: 'manual' as TaskSortMode, failSort: false, delaySort: false }
   const settings = { password: '测试密码' }
   let authenticated = false
   const config: RuntimeConfig = { revision: 4, temp_dir: '/var/lib/tg-forward/temp', max_concurrent_tasks: 1, min_free_disk_mb: 1024, temp_max_age_hours: 24, download_workers: 4, upload_workers: 4, web_auth_ttl_hours: 24, web_password_configured: true }
@@ -31,7 +31,15 @@ async function setup(page: Page) {
     }
     if (url.pathname === '/api/tasks') {
       if (method === 'POST') { tasks.push({ task_id: body.task_id, status: 'stopped', revision: 1, config: body, progress: { forwarded_count: 0, last_message_id: 0, last_forward_time: '' }, transfer: null, errors: { unresolved: 0, count: 0 } }); return send({ success: true }) }
-      return control.failTasks ? send({ error: 'unavailable', message: '服务暂时不可用' }, 503) : send(tasks)
+      const ordered = [...tasks]
+      if (control.sortMode === 'recent') ordered.sort((a, b) => (Date.parse(b.progress.last_forward_time) || 0) - (Date.parse(a.progress.last_forward_time) || 0))
+      return control.failTasks ? send({ error: 'unavailable', message: '服务暂时不可用' }, 503) : send(url.searchParams.get('view') === '1' ? { tasks: ordered, sort_mode: control.sortMode } : ordered)
+    }
+    if (url.pathname === '/api/task-order') {
+      if (control.delaySort) await new Promise(resolve => setTimeout(resolve, 800))
+      if (control.failSort) return send({ error: 'unavailable', message: '排序保存失败' }, 503)
+      control.sortMode = body.sort_mode
+      return send({ success: true })
     }
     if (url.pathname === '/api/config') {
       if (method === 'PUT') {
@@ -52,10 +60,19 @@ async function setup(page: Page) {
       const task = tasks.find(t => t.task_id === decodeURIComponent(match[1]))
       if (!task) return send({ error: 'task_not_found', message: '任务不存在' }, 404)
       if (match[2] === '/errors') return send({ errors: [{ id: 1, stage: 'telegram_download', filename: '资料中文名.mp4', error: '临时错误 <script>不会执行</script>', created_at: new Date().toISOString(), message_id: 401 }] })
+      if (match[2] === '/move') {
+        if (control.delaySort) await new Promise(resolve => setTimeout(resolve, 800))
+        if (control.failSort) return send({ error: 'unavailable', message: '排序保存失败' }, 503)
+        if (control.sortMode !== 'manual') return send({ error: 'invalid_input', message: '切换到手动顺序后可移动任务' }, 400)
+        const index = tasks.indexOf(task), adjacent = index + (body.direction === 'up' ? -1 : 1)
+        if (adjacent >= 0 && adjacent < tasks.length) [tasks[index], tasks[adjacent]] = [tasks[adjacent], tasks[index]]
+        return send({ success: true })
+      }
       if (match[2] === '/action') {
         control.actionCount++
         if (control.delayAction) await new Promise(resolve => setTimeout(resolve, 800))
-        task.status = ({ pause: 'paused', resume: 'running', start: 'running', stop: 'stopped' } as Record<string, TaskSnapshot['status']>)[body.action]
+        if (!['start', 'stop'].includes(body.action)) return send({ error: 'invalid_input', message: '不支持的任务操作' }, 400)
+        task.status = body.action === 'start' ? 'running' : 'stopped'
         return send({ success: true })
       }
       if (!match[2] && method === 'PUT') {
@@ -90,6 +107,236 @@ async function noOverflow(page: Page) {
   expect(value.body).toBeLessThanOrEqual(value.viewport)
 }
 
+async function taskOrder(page: Page) {
+  return page.locator('.task-card').evaluateAll(cards => cards.map(card => card.getAttribute('data-card-id')))
+}
+
+test('topic title switch saves, depends on hiding source and updates configured rules', async ({ page }) => {
+  const state = await setup(page)
+  await login(page)
+  await page.click('#new-task-btn')
+  const topic = page.locator('#task-form-include_topic_name')
+  const toggle = page.locator('label.switch').filter({ has: topic })
+  await expect(topic).not.toBeChecked()
+  await toggle.click()
+  await expect(topic).toBeChecked()
+  const hide = page.locator('label.switch').filter({ has: page.locator('#task-form-hide_source') })
+  await hide.click()
+  await expect(topic).not.toBeChecked()
+  await expect(topic).toBeDisabled()
+  await hide.click()
+  await expect(topic).toBeEnabled()
+  await toggle.click()
+  await page.fill('#task-form-id', 'topic_title')
+  await page.fill('#task-form-source_channel', '-100123')
+  await page.fill('#task-form-target_channel', '-100456')
+  await page.click('#task-advanced summary')
+  await page.fill('#task-form-prefix', '【video1】前缀')
+  await page.click('#task-submit')
+  const card = page.locator('[data-card-id="topic_title"]')
+  await expect(card).toBeVisible()
+  const created = state.tasks.find(task => task.task_id === 'topic_title')!
+  expect(created.config.include_topic_name).toBe(true)
+  expect(created.config.caption_prefix).toBe('【video1】前缀')
+  await card.locator('.task-rules summary').click()
+  await expect(card.locator('[data-rule="include_topic_name"]')).toContainText('标题携带来源话题名')
+  await expect(card.locator('.task-rules summary')).toContainText('3 项')
+  await card.locator('[data-action="edit"]').click()
+  await expect(topic).toBeChecked()
+  await toggle.click()
+  await page.click('#task-submit')
+  await expect(page.locator('#task-modal')).toHaveCount(0)
+  expect(created.config.include_topic_name).toBe(false)
+  await expect(card.locator('[data-rule="include_topic_name"]')).toHaveCount(0)
+  await expect(card.locator('.task-rules summary')).toContainText('2 项')
+  expect(state.errors).toEqual([])
+})
+
+test('task ordering saves manual moves and recent mode, restores manual order and respects filters', async ({ page }) => {
+  const state = await setup(page)
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  const daily = page.locator('[data-card-id="daily"]'), archive = page.locator('[data-card-id="archive"]'), later = page.locator('[data-card-id="later"]')
+  const sort = page.locator('#task-sort-mode')
+  await expect(sort).toHaveValue('manual')
+  await daily.locator('.task-menu summary').click()
+  await expect(daily.locator('[data-action="up"]')).toBeDisabled()
+  await expect(daily.locator('[data-action="down"]')).toBeEnabled() // running tasks can move
+  state.control.delaySort = true
+  await daily.locator('[data-action="down"]').click()
+  await expect(sort).toBeDisabled()
+  await expect(daily.locator('.task-menu')).not.toHaveAttribute('open', '')
+  await archive.locator('.task-menu summary').click()
+  await expect(archive.locator('[data-action="up"]')).toBeDisabled()
+  await expect(archive.locator('[data-action="down"]')).toBeDisabled()
+  await expect.poll(() => taskOrder(page)).toEqual(['archive', 'daily', 'later'])
+  await expect(sort).toBeEnabled()
+  state.control.delaySort = false
+  await page.reload()
+  await expect.poll(() => taskOrder(page)).toEqual(['archive', 'daily', 'later'])
+  await later.locator('.task-menu summary').click()
+  await expect(later.locator('[data-action="down"]')).toBeDisabled()
+  await sort.selectOption('recent')
+  await expect.poll(() => taskOrder(page)).toEqual(['daily', 'archive', 'later'])
+  await expect(sort).toBeEnabled()
+  await daily.locator('.task-menu summary').click()
+  await expect(daily.locator('[data-action="down"]')).toBeDisabled()
+  await expect(daily.locator('[data-action="down"]')).toHaveAttribute('title', '切换到手动顺序后可移动')
+  await page.reload()
+  await expect(sort).toHaveValue('recent')
+  await expect.poll(() => taskOrder(page)).toEqual(['daily', 'archive', 'later'])
+  await sort.selectOption('manual')
+  await expect.poll(() => taskOrder(page)).toEqual(['archive', 'daily', 'later'])
+  await page.fill('#task-search', '资料')
+  await archive.locator('.task-menu summary').click()
+  await expect(archive.locator('[data-action="down"]')).toBeDisabled()
+  await expect(archive.locator('[data-action="down"]')).toHaveAttribute('title', '清空搜索并切换到全部任务后可移动')
+  await page.fill('#task-search', '')
+  await page.click('[data-filter="stopped"]')
+  await archive.locator('.task-menu summary').click()
+  await expect(archive.locator('[data-action="down"]')).toBeDisabled()
+  expect(state.writes.filter(write => write.path.endsWith('/move')).map(write => write.body)).toEqual([{ direction: 'down' }])
+  expect(state.errors).toEqual([])
+})
+
+test('failed task ordering restores controls and the last confirmed order', async ({ page }) => {
+  const state = await setup(page)
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  state.control.failSort = true
+  const sort = page.locator('#task-sort-mode')
+  await sort.selectOption('recent')
+  await expect(page.locator('.toast').filter({ hasText: '排序保存失败' }).first()).toBeVisible()
+  await expect(sort).toHaveValue('manual')
+  await expect(sort).toBeEnabled()
+  const daily = page.locator('[data-card-id="daily"]')
+  await daily.locator('.task-menu summary').click()
+  await daily.locator('[data-action="down"]').click()
+  await expect(sort).toBeEnabled()
+  expect(await taskOrder(page)).toEqual(['daily', 'archive', 'later'])
+  state.control.failSort = false
+  await daily.locator('.task-menu summary').click()
+  await daily.locator('[data-action="down"]').click()
+  await expect.poll(() => taskOrder(page)).toEqual(['archive', 'daily', 'later'])
+  expect(state.errors).toEqual([])
+})
+
+test('recent order follows new forwarding times and mode changes from another page on polling', async ({ page }) => {
+  const state = await setup(page)
+  await page.clock.install()
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  await page.locator('#task-sort-mode').selectOption('recent')
+  await expect(page.locator('#task-sort-mode')).toBeEnabled()
+  state.tasks[2].progress.last_forward_time = new Date(Date.now() + 1000).toISOString()
+  await page.clock.runFor(5000)
+  await expect.poll(() => taskOrder(page)).toEqual(['later', 'daily', 'archive'])
+  state.control.sortMode = 'manual'
+  await page.clock.runFor(5000)
+  await expect(page.locator('#task-sort-mode')).toHaveValue('manual')
+  await expect.poll(() => taskOrder(page)).toEqual(['daily', 'archive', 'later'])
+  expect(state.errors).toEqual([])
+})
+
+test('manual refresh spins until all page requests finish and recovers after failure', async ({ page }) => {
+  const state = await setup(page)
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  const button = page.locator('#refresh-btn'), held: string[] = []
+  const gates = new Map<string, Promise<void>>()
+  function hold(path: string) {
+    let release!: () => void
+    gates.set(path, new Promise<void>(resolve => { release = resolve }))
+    return () => { gates.delete(path); release() }
+  }
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    const gate = gates.get(path)
+    if (gate) { held.push(path); await gate }
+    await route.fallback()
+  })
+  const releaseTasks = hold('/api/tasks'), releaseDeployment = hold('/api/deployment')
+  await button.click()
+  await expect(button).toHaveClass(/busy/)
+  await expect(button).toHaveAttribute('aria-busy', 'true')
+  await expect(button).toBeDisabled()
+  expect(await button.locator('.icon').evaluate(icon => getComputedStyle(icon).animationName)).toBe('spin')
+  await expect.poll(() => held).toContain('/api/tasks')
+  await expect.poll(() => held).toContain('/api/deployment')
+  releaseDeployment()
+  await expect(button).toBeDisabled()
+  state.control.failTasks = true
+  releaseTasks()
+  await expect(page.locator('#banner')).toBeVisible()
+  await expect(button).not.toHaveClass(/busy/)
+  await expect(button).toHaveAttribute('aria-busy', 'false')
+  await expect(button).toBeEnabled()
+  state.control.failTasks = false
+
+  for (const [view, path] of [['settings', '/api/config'], ['resources', '/api/system'], ['activity', '/api/logs']]) {
+    await page.click(`[data-view="${view}"]`)
+    await expect(page.locator(`[data-page="${view}"]`)).toBeVisible()
+    const count = held.length, release = hold(path)
+    await button.click()
+    await expect.poll(() => held.length).toBeGreaterThan(count)
+    await expect(button).toHaveClass(/busy/)
+    release()
+    await expect(button).toBeEnabled()
+    await expect(button).not.toHaveClass(/busy/)
+  }
+  expect(state.errors).toEqual([])
+})
+
+test('manual refresh waits for a queued fetch without overlapping the active page request', async ({ page }) => {
+  const state = await setup(page)
+  await page.clock.install()
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  let releaseFirst!: () => void, releaseSecond!: () => void
+  const gates = [new Promise<void>(resolve => { releaseFirst = resolve }), new Promise<void>(resolve => { releaseSecond = resolve })]
+  let requests = 0, inFlight = 0, maxInFlight = 0
+  await page.route('**/api/tasks?view=1', async route => {
+    const index = requests++
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight)
+    await gates[index]
+    await route.fallback()
+    inFlight--
+  })
+  await page.clock.runFor(5000)
+  await expect.poll(() => requests).toBe(1)
+  const button = page.locator('#refresh-btn')
+  await expect(button).not.toHaveClass(/busy/)
+  await button.click()
+  await expect(button).toHaveClass(/busy/)
+  releaseFirst()
+  await expect.poll(() => requests).toBe(2)
+  await expect(button).toBeDisabled()
+  releaseSecond()
+  await expect(button).toBeEnabled()
+  await expect(button).not.toHaveClass(/busy/)
+  expect(maxInFlight).toBe(1)
+  expect(state.errors).toEqual([])
+})
+
+test('manual refresh stops waiting for the old page after navigation', async ({ page }) => {
+  const state = await setup(page)
+  await login(page)
+  await expect(page.locator('.task-card')).toHaveCount(3)
+  let release!: () => void, requested = false
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/tasks?view=1', async route => { requested = true; await gate; await route.abort() })
+  const button = page.locator('#refresh-btn')
+  await button.click()
+  await expect.poll(() => requested).toBe(true)
+  await expect(button).toHaveClass(/busy/)
+  await page.click('[data-view="settings"]')
+  await expect(page.locator('[data-page="settings"]')).toBeVisible()
+  await expect(button).toBeEnabled()
+  await expect(button).not.toHaveClass(/busy/)
+  release()
+  expect(state.errors).toEqual([])
+})
+
 test('authentication, tasks, forms, conflicts, resources and expiry', async ({ page }) => {
   const state = await setup(page)
   await login(page)
@@ -101,19 +348,27 @@ test('authentication, tasks, forms, conflicts, resources and expiry', async ({ p
   await page.fill('#task-search', '不存在')
   await expect(page.locator('#tasks')).toContainText('没有匹配')
   await page.fill('#task-search', '')
-  await page.click('[data-filter="paused"]')
-  await expect(page.locator('.task-card')).toHaveCount(1)
+  await page.click('[data-filter="stopped"]')
+  await expect(page.locator('.task-card')).toHaveCount(2)
   await page.click('[data-filter="all"]')
+  await expect(page.locator('#stat-stopped')).toHaveText('2')
+  await expect(page.locator('[data-action="pause"], [data-action="resume"], [data-filter="paused"]')).toHaveCount(0)
+  const checkpoint = state.tasks[0].progress.last_message_id, forwarded = state.tasks[0].progress.forwarded_count
   state.control.delayAction = true
-  await daily.locator('[data-action="pause"]').click()
-  await expect(daily.locator('[data-action="pause"]')).toBeDisabled()
+  await daily.locator('[data-action="stop"]').click()
+  await expect(daily.locator('[data-action="stop"]')).toBeDisabled()
   await page.click('#refresh-btn')
-  await expect(daily.locator('[data-action="pause"]')).toBeDisabled()
-  await expect(daily.locator('[data-action="resume"]')).toBeVisible()
+  await expect(daily.locator('[data-action="stop"]')).toBeDisabled()
+  await expect(daily.locator('[data-action="start"]')).toBeVisible()
+  await expect(page.locator('#stat-stopped')).toHaveText('3')
+  await expect(daily.locator('[data-action="edit"]')).toBeEnabled()
   expect(state.control.actionCount).toBe(1)
   state.control.delayAction = false
-  await daily.locator('[data-action="resume"]').click()
-  await expect(daily.locator('[data-action="pause"]')).toBeVisible()
+  await daily.locator('[data-action="start"]').click()
+  await expect(daily.locator('[data-action="stop"]')).toBeVisible()
+  await expect(daily.locator('[data-action="edit"]')).toBeDisabled()
+  expect(state.tasks[0].progress.last_message_id).toBe(checkpoint)
+  expect(state.tasks[0].progress.forwarded_count).toBe(forwarded)
   await archive.locator('.task-menu summary').click()
   await archive.locator('[data-action="delete"]').click()
   await expect(page.locator('#confirm-modal')).toBeVisible()
@@ -197,19 +452,21 @@ test('task merge adopts remote arrays and source without resetting the latest so
   await page.locator('[data-card-id="archive"] [data-action="edit"]').click()
   await page.fill('#task-form-note', '本地备注')
   const task = state.tasks[1]
-  Object.assign(task.config, { filter_keywords: ['服务器关键词', '新增词'], required_hashtags: ['最新标签'], source_channel: -100999, source_topic_id: 7, target_topic_id: 9, caption_prefix: '服务器前缀', remove_hashtags: true })
+  Object.assign(task.config, { filter_keywords: ['服务器关键词', '新增词'], required_hashtags: ['最新标签'], source_channel: -100999, source_topic_id: 7, target_topic_id: 9, caption_prefix: '服务器前缀', remove_hashtags: true, require_video: true, include_topic_name: true })
   task.revision++
   await page.click('#task-submit')
   await reloadConflict(page, 'task')
   await expect(page.locator('#task-form-keywords')).toHaveValue('服务器关键词\n新增词')
   await expect(page.locator('#task-form-hashtags')).toHaveValue('最新标签')
   await expect(page.locator('#task-form-prefix')).toHaveValue('服务器前缀')
+  await expect(page.locator('#task-form-require_video')).toBeChecked()
+  await expect(page.locator('#task-form-include_topic_name')).toBeChecked()
   await expect(page.locator('#task-form-remove_hashtags')).toBeChecked()
   await expect(page.locator('#source-reset-options')).toHaveCount(0)
   await expect(page.locator('[data-conflict-field]')).toHaveCount(0)
   await page.click('#task-submit')
   await expect(page.locator('#task-modal')).toHaveCount(0)
-  expect(task.config).toMatchObject({ note: '本地备注', source_channel: -100999, source_topic_id: 7, target_topic_id: 9, filter_keywords: ['服务器关键词', '新增词'], required_hashtags: ['最新标签'], remove_hashtags: true })
+  expect(task.config).toMatchObject({ note: '本地备注', source_channel: -100999, source_topic_id: 7, target_topic_id: 9, filter_keywords: ['服务器关键词', '新增词'], required_hashtags: ['最新标签'], remove_hashtags: true, require_video: true, include_topic_name: true })
   expect(state.writes.at(-1)?.body).not.toHaveProperty('source_reset')
   expect(task.progress.last_message_id).toBe(402)
   expect(task.config).not.toHaveProperty('revision')

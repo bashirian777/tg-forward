@@ -6,10 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from telethon import types
+from tg_forwarder.bot.app import ForwarderBot
 from tg_forwarder.forwarding.engine import Forwarder
 from tg_forwarder.telegram.sender import ReliableSender
+from tg_forwarder.tasks.models import ForwardResult
 from tg_forwarder.tasks.validation import validate_task
-from tests.support import manager
+from tests.http_support import http_client, login
+from tests.support import manager, startup
 
 
 @pytest.mark.asyncio
@@ -21,35 +24,121 @@ async def test_fallback_chain_limit_follows_media_group_setting(state):
     assert mgr.client.disk_semaphore._value == limit + 1
 
 
+@pytest.mark.parametrize("action", ["pause", "resume"])
+def test_removed_controls_rejected_without_state_changes(state, tmp_path, action):
+    cm, tracker, task = state
+    tracker.record_forwarded(task.task_id, 10, 1)
+    with http_client(state, tmp_path) as (client, _):
+        headers = login(client)
+        before = client.get(f"/api/tasks/{task.task_id}").json
+        response = client.post(f"/api/tasks/{task.task_id}/action", headers=headers,
+            json={"action": action})
+        assert response.status_code == 400
+        assert response.json["error"] == "invalid_input"
+        assert client.get(f"/api/tasks/{task.task_id}").json == before
+    assert not any(entry["action"] == action + "_task" for entry in cm.db.list_logs())
+
+
+@pytest.mark.parametrize("action", ["pause", "resume"])
 @pytest.mark.asyncio
-async def test_resume_stopped_task_rejected(state):
+async def test_old_bot_control_buttons_are_expired(state, tmp_path, action):
     mgr = manager(state)
-    with pytest.raises(ValueError):
-        await mgr.resume_task("task")
-    assert mgr.get_task_status("task").status == "stopped"
+    bot = ForwarderBot(startup(tmp_path), mgr)
+    event = SimpleNamespace(data=f"{action}_task".encode(), answer=AsyncMock())
+    before = mgr.task_snapshot("task")
+    logs = mgr.get_logs()
+    await bot._handle_callback(event)
+    event.answer.assert_awaited_once_with("操作已失效，请重新打开任务列表", alert=True)
+    assert mgr.task_snapshot("task") == before
+    assert mgr.get_logs() == logs
 
 
 @pytest.mark.asyncio
-async def test_paused_queued_task_does_not_send(state):
+async def test_stopped_queued_task_does_not_send(state):
     cm, tracker, task = state
     semaphore = asyncio.Semaphore(0)
     handler = SimpleNamespace(is_media_message=lambda m: True, forward_message_group=AsyncMock())
     client = SimpleNamespace(get_messages=AsyncMock(return_value=[SimpleNamespace(id=1, grouped_id=None)]))
     engine = Forwarder(client, handler, tracker, semaphore)
     runner = asyncio.create_task(engine.run_task(task))
-    for _ in range(20):
-        if semaphore._waiters:
-            break
-        await asyncio.sleep(0)
-    engine.pause()
-    semaphore.release()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    handler.forward_message_group.assert_not_awaited()
-    engine.stop()
-    runner.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await runner
+    try:
+        for _ in range(20):
+            if semaphore._waiters:
+                break
+            await asyncio.sleep(0)
+        assert semaphore._waiters
+        engine.stop()
+        semaphore.release()
+        await asyncio.wait_for(runner, timeout=1)
+        handler.forward_message_group.assert_not_awaited()
+        assert tracker.get_last_message_id(task.task_id) == 0
+        assert tracker.get_transfer(task.task_id) is None
+    finally:
+        engine.stop()
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_and_start_preserve_checkpoint_and_retry_only_unfinished_group(state, monkeypatch):
+    _, tracker, task = state
+    mgr = manager(state)
+    messages = [SimpleNamespace(id=i, grouped_id=None) for i in (10, 11)]
+    mgr.client.get_messages = AsyncMock(side_effect=lambda channel, min_id, limit:
+        [message for message in messages if message.id > min_id])
+    entered, cancelled, fetched_after_restart = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    attempts = []
+    interrupted = True
+
+    class Handler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def is_media_message(self, message):
+            return True
+
+        async def forward_message_group(self, group, *args, **kwargs):
+            nonlocal interrupted
+            ids = [message.id for message in group]
+            attempts.append(ids)
+            if ids == [11] and interrupted:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    interrupted = False
+                    cancelled.set()
+            return ForwardResult(True, "copy", forwarded_count=len(group))
+
+    monkeypatch.setattr("tg_forwarder.tasks.manager.MessageHandler", Handler)
+    try:
+        await mgr.start_task(task.task_id)
+        first_runner = mgr._tasks[task.task_id]
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        await mgr.stop_task(task.task_id)
+        assert first_runner.done() and cancelled.is_set()
+        assert mgr.get_task_status(task.task_id).status == "stopped"
+        assert tracker.get_last_message_id(task.task_id) == 10
+        assert tracker.get_task_progress(task.task_id).forwarded_count == 1
+        assert tracker.get_transfer(task.task_id)["state"] == "interrupted"
+        assert tracker.get_transfer(task.task_id)["message_ids"] == [11]
+
+        async def fetch_after_restart(channel, min_id, limit):
+            if min_id == 11:
+                fetched_after_restart.set()
+            return [message for message in messages if message.id > min_id]
+
+        mgr.client.get_messages.side_effect = fetch_after_restart
+        await mgr.start_task(task.task_id)
+        assert mgr._tasks[task.task_id] is not first_runner
+        await asyncio.wait_for(fetched_after_restart.wait(), timeout=1)
+        assert mgr.get_task_status(task.task_id).status == "running"
+        assert tracker.get_last_message_id(task.task_id) == 11
+        assert tracker.get_task_progress(task.task_id).forwarded_count == 2
+        assert attempts == [[10], [11], [11]]
+        assert tracker.get_transfer(task.task_id) is None
+    finally:
+        await mgr.stop_task(task.task_id)
 
 
 @pytest.mark.asyncio

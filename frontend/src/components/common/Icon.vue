@@ -6,7 +6,7 @@ const paths: Record<string, string> = {
  sliders: 'M4 3v7m0 4v7M12 3v5m0 4v9M20 3v9m0 4v5M2 14h4M10 8h4M18 16h4',
  history: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 2', refresh: 'M20 6v5h-5M4 18v-5h5M6 9A7 7 0 0 1 18 6l2 3M4 15l2 3a7 7 0 0 0 12-3',
  plus: 'M12 5v14M5 12h14', x: 'M18 6 6 18M6 6l12 12', check: 'M20 6 9 17l-5-5', alert: 'M12 3 2.5 20h19L12 3ZM12 10v4M12 17h.01',
- play: 'm7 4 13 8-13 8V4Z', pause: 'M9 5v14M15 5v14', resume: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5', stop: 'M5 5h14v14H5Z',
+ play: 'm7 4 13 8-13 8V4Z', stop: 'M5 5h14v14H5Z',
  edit: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z', more: 'M5 12h.01M12 12h.01M19 12h.01',
  arrow: 'M5 12h14M13 6l6 6-6 6', up: 'M12 19V5M5 12l7-7 7 7', down: 'M12 5v14M19 12l-7 7-7-7',
  search: 'M16 16l5 5M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0', lock: 'M4 11h16v10H4ZM8 11V7a4 4 0 0 1 8 0v4',

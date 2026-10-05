@@ -31,12 +31,20 @@ class ManagementOperations:
         task_id = params.get("task_id")
         if task_id is not None:
             manager.require_task(task_id)
-        if operation in {"task.create", "task.update", "task.action", "progress.set", "config.update"} and not isinstance(params.get("data"), dict):
+        if operation in {"task.create", "task.update", "task.action", "task.move", "tasks.sort", "progress.set", "config.update"} and not isinstance(params.get("data"), dict):
             raise ValueError("请求必须包含 JSON 对象")
         if operation == "progress.set" and "last_message_id" not in params["data"]:
             raise ValueError("必须指定 last_message_id")
         if operation == "tasks":
             return manager.task_snapshots()
+        if operation == "tasks.view":
+            return manager.tasks_view()
+        if operation == "tasks.sort":
+            manager.set_task_sort_mode(params["data"].get("sort_mode"))
+            return {"success": True}
+        if operation == "task.move":
+            manager.move_task(task_id, params["data"].get("direction"))
+            return {"success": True}
         if operation == "task":
             return manager.task_snapshot(task_id)
         if operation == "config":
@@ -68,7 +76,7 @@ class ManagementOperations:
             return {"success": True, "task": result["config"]}
         if operation == "task.action":
             action = params["data"].get("action")
-            if action not in {"start", "pause", "resume", "stop"}:
+            if action not in {"start", "stop"}:
                 raise ValueError("不支持的任务操作")
             await getattr(manager, action + "_task")(task_id)
         elif operation == "task.delete":

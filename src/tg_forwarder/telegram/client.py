@@ -58,6 +58,9 @@ class TelegramClientWrapper:
         self.download_workers = 4
         self.upload_workers = 4
         self.connection_status = {"state": "disconnected", "message": "Telegram 尚未连接"}
+        self._topic_sources = {}
+        self._topic_names = {}
+        self._caption_limit = (0, 1024)
 
     def set_progress_tracker(self, tracker):
         """Set progress tracker for download/upload progress updates."""
@@ -173,6 +176,61 @@ class TelegramClientWrapper:
         else:
             return await self._client.get_entity(channel_id)
 
+    async def get_source_topic_name(self, channel_id: int, message: Message) -> Optional[str]:
+        """Read the current forum topic name, never treating ordinary replies as topics."""
+        now = time.monotonic()
+        cached = self._topic_sources.get(channel_id)
+        if cached is None or cached[0] <= now:
+            try:
+                entity = await self.get_entity(channel_id)
+            except FloodWaitError:
+                raise
+            except Exception as error:
+                logger.warning("Could not read source forum %s: %s", channel_id, error)
+                self._topic_sources[channel_id] = (now + 60, None)
+                return None
+            self._topic_sources[channel_id] = (now + 300, entity)
+        else:
+            entity = cached[1]
+        if not getattr(entity, "forum", False):
+            return None
+        reply = getattr(message, "reply_to", None)
+        topic_id = ((getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None))
+                    if getattr(reply, "forum_topic", False) else 1)
+        if not topic_id:
+            return None
+        key = (channel_id, topic_id)
+        cached = self._topic_names.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        try:
+            result = await self._client(functions.messages.GetForumTopicsByIDRequest(entity, [topic_id]))
+            topic = next((topic for topic in result.topics if topic.id == topic_id), None)
+            name = getattr(topic, "title", None)
+            name = " ".join(name.split()) if isinstance(name, str) else None
+        except FloodWaitError:
+            raise
+        except Exception as error:
+            logger.warning("Could not read source topic %s/%s: %s", channel_id, topic_id, error)
+            name = None
+        self._topic_names[key] = (time.monotonic() + (300 if name else 60), name or None)
+        return name or None
+
+    async def get_caption_limit(self) -> int:
+        """Use Telegram's caption limit; retain a conservative limit if unavailable."""
+        if self._caption_limit[0] <= time.monotonic():
+            limit = 1024
+            try:
+                config = await self._client(functions.help.GetConfigRequest())
+                if type(config.caption_length_max) is int and config.caption_length_max > 0:
+                    limit = config.caption_length_max
+            except FloodWaitError:
+                raise
+            except Exception:
+                pass
+            self._caption_limit = (time.monotonic() + 300, limit)
+        return self._caption_limit[1]
+
     async def get_messages(self, channel_id: int, min_id: int = 0,
                           limit: int = 100) -> List[Message]:
         """Get messages from a channel/group."""
@@ -203,7 +261,8 @@ class TelegramClientWrapper:
         if source:
             await self._client.forward_messages(entity, message_ids, source)
         else:
-            kwargs = {"caption": caption}
+            kwargs = ({"caption": caption.text, "formatting_entities": caption.entities, "parse_mode": None}
+                      if isinstance(caption, types.TextWithEntities) else {"caption": caption})
             if reply_to:
                 kwargs["reply_to"] = reply_to
             if send_as:

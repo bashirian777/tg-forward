@@ -47,7 +47,7 @@ def validate_task(task):
             raise ValidationError(error)
     if task.source_channel == task.target_channel:
         raise ValidationError("Source and target must differ to prevent forwarding loops")
-    for name in ("enabled", "hide_source", "remove_hashtags", "send_as_channel", "deduplicate"):
+    for name in ("enabled", "hide_source", "remove_hashtags", "send_as_channel", "deduplicate", "require_video", "include_topic_name"):
         if type(getattr(task, name)) is not bool:
             raise ValidationError(f"{name} must be a boolean")
     for name in ("source_topic_id", "target_topic_id"):
@@ -61,5 +61,5 @@ def validate_task(task):
     for name in ("note", "caption_prefix"):
         if not isinstance(getattr(task, name), str):
             raise ValidationError(f"{name} must be a string")
-    if not task.hide_source and (task.caption_prefix or task.remove_hashtags or task.send_as_channel):
+    if not task.hide_source and (task.caption_prefix or task.remove_hashtags or task.send_as_channel or task.include_topic_name):
         raise ValidationError("Showing the source cannot be combined with caption edits or send-as")

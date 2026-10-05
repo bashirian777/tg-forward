@@ -3,7 +3,7 @@ export interface TaskConfig {
   min_delay: number; max_delay: number; enabled: boolean; note: string;
   hide_source: boolean; caption_prefix: string; filter_keywords: string[];
   required_hashtags: string[]; target_topic_id: number | null; source_topic_id: number | null;
-  remove_hashtags: boolean; send_as_channel: boolean; deduplicate: boolean;
+  remove_hashtags: boolean; send_as_channel: boolean; deduplicate: boolean; require_video: boolean; include_topic_name: boolean;
 }
 export interface Progress { last_message_id: number; forwarded_count: number; last_forward_time: string }
 export interface Transfer {
@@ -11,10 +11,12 @@ export interface Transfer {
   current: number; total: number; speed_bps: number; file_index: number; total_files: number;
 }
 export interface TaskSnapshot {
-  task_id: string; status: 'running' | 'paused' | 'stopped' | 'error'; revision: number;
+  task_id: string; status: 'running' | 'stopped' | 'error'; revision: number;
   config: TaskConfig; progress: Progress; transfer: Transfer | null;
   errors: { unresolved: number; count: number };
 }
+export type TaskSortMode = 'manual' | 'recent'
+export interface TaskList { tasks: TaskSnapshot[]; sort_mode: TaskSortMode }
 export interface RuntimeConfig {
   revision: number; temp_dir: string; temp_max_age_hours: number; web_auth_ttl_hours: number;
   web_password_configured: boolean; max_concurrent_tasks: number; min_free_disk_mb: number;

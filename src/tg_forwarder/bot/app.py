@@ -126,12 +126,6 @@ class ForwarderBot(TaskWizardMixin):
         elif data.startswith("start_"):
             task_id = data[6:]
             await self._do_start_task(event, task_id)
-        elif data.startswith("pause_"):
-            task_id = data[6:]
-            await self._do_pause(event, task_id)
-        elif data.startswith("resume_"):
-            task_id = data[7:]
-            await self._do_resume(event, task_id)
         elif data.startswith("stop_"):
             task_id = data[5:]
             await self._do_stop(event, task_id)
@@ -141,6 +135,9 @@ class ForwarderBot(TaskWizardMixin):
         elif data.startswith("confirm_del_"):
             task_id = data[12:]
             await self._do_confirm_delete(event, task_id)
+        else:
+            await event.answer("操作已失效，请重新打开任务列表", alert=True)
+            return
 
         await event.answer()
 
@@ -157,7 +154,7 @@ class ForwarderBot(TaskWizardMixin):
         buttons = []
 
         for ts in tasks:
-            status_emoji = {"running": "🟢", "paused": "🟡", "stopped": "🔴", "completed": "✅"}.get(ts.status, "⚪")
+            status_emoji = {"running": "🟢", "stopped": "🔴", "error": "⚠️"}.get(ts.status, "⚪")
 
             count = ts.progress.forwarded_count if ts.progress else 0
             note = ts.config.note if ts.config and ts.config.note else ""
@@ -181,7 +178,7 @@ class ForwarderBot(TaskWizardMixin):
         """Show action buttons for a specific task."""
         ts = self._task_manager.get_task_status(task_id)
 
-        status_emoji = {"running": "🟢", "paused": "🟡", "stopped": "🔴", "completed": "✅"}.get(ts.status, "⚪")
+        status_emoji = {"running": "🟢", "stopped": "🔴", "error": "⚠️"}.get(ts.status, "⚪")
 
         msg = f"📌 **任务详情**\n\n"
         msg += f"ID: `{ts.task_id}`\n"
@@ -202,20 +199,20 @@ class ForwarderBot(TaskWizardMixin):
                 msg += f"必须包含: {' '.join(ts.config.required_hashtags)}\n"
                 msg += f"删除Hashtag: {'是' if ts.config.remove_hashtags else '否'}\n"
             msg += f"以频道身份发送: {'是' if ts.config.send_as_channel else '否'}\n"
+            if ts.config.require_video:
+                msg += "仅转发含视频的消息: 开启\n"
+            if ts.config.include_topic_name:
+                msg += "标题携带来源话题名: 开启\n"
             msg += f"去重: {'是' if ts.config.deduplicate else '否'}\n"
         if ts.progress:
             msg += f"已转发: {ts.progress.forwarded_count} 条\n"
 
         # Build action buttons based on status
         buttons = []
-        if ts.status == "stopped" or ts.status not in ["running", "paused"]:
+        if ts.status == "running":
+            buttons.append([Button.inline("⏹️ 停止", f"stop_{task_id}".encode())])
+        else:
             buttons.append([Button.inline("▶️ 启动", f"start_{task_id}".encode())])
-        elif ts.status == "running":
-            buttons.append([Button.inline("⏸️ 暂停", f"pause_{task_id}".encode())])
-            buttons.append([Button.inline("⏹️ 停止", f"stop_{task_id}".encode())])
-        elif ts.status == "paused":
-            buttons.append([Button.inline("▶️ 恢复", f"resume_{task_id}".encode())])
-            buttons.append([Button.inline("⏹️ 停止", f"stop_{task_id}".encode())])
 
         buttons.append([Button.inline("🗑️ 删除", f"delete_{task_id}".encode())])
         buttons.append([Button.inline("🔙 返回列表", b"list")])
@@ -230,24 +227,6 @@ class ForwarderBot(TaskWizardMixin):
             await self._show_task_actions(event, task_id)
         except Exception as e:
             await event.answer(f"❌ 启动失败: {e}", alert=True)
-
-    async def _do_pause(self, event, task_id: str) -> None:
-        """Pause a task."""
-        try:
-            await self._task_manager.pause_task(task_id)
-            await event.answer(f"⏸️ 任务已暂停", alert=True)
-            await self._show_task_actions(event, task_id)
-        except Exception as e:
-            await event.answer(f"❌ 暂停失败: {e}", alert=True)
-
-    async def _do_resume(self, event, task_id: str) -> None:
-        """Resume a task."""
-        try:
-            await self._task_manager.resume_task(task_id)
-            await event.answer(f"▶️ 任务已恢复", alert=True)
-            await self._show_task_actions(event, task_id)
-        except Exception as e:
-            await event.answer(f"❌ 恢复失败: {e}", alert=True)
 
     async def _do_stop(self, event, task_id: str) -> None:
         """Stop a task."""
@@ -280,14 +259,12 @@ class ForwarderBot(TaskWizardMixin):
         tasks = self._task_manager.list_tasks()
 
         running = sum(1 for t in tasks if t.status == "running")
-        paused = sum(1 for t in tasks if t.status == "paused")
         stopped = sum(1 for t in tasks if t.status == "stopped")
         total_forwarded = sum(t.progress.forwarded_count for t in tasks if t.progress)
 
         msg = (
             "📊 **运行状态**\n\n"
             f"🟢 运行中: {running}\n"
-            f"🟡 已暂停: {paused}\n"
             f"🔴 已停止: {stopped}\n"
             f"📨 总转发: {total_forwarded} 条"
         )

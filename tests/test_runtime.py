@@ -105,7 +105,6 @@ async def test_retry_holds_task_lock_through_stop_clear_and_restart(state):
     mgr._stop_task = stopping
     mgr._start_task = starting
     mgr.is_active = lambda _: True
-    mgr._forwarders["task"] = SimpleNamespace(is_paused=False)
     mgr.clear_transfer = lambda _: events.append("clear")
     retry = asyncio.create_task(mgr.retry_transfer("task"))
     await entered.wait()

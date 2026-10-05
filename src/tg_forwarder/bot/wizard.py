@@ -197,8 +197,28 @@ class TaskWizardMixin:
         elif step == "deduplicate":
             deduplicate = (text == "1")
             pending["deduplicate"] = deduplicate
-            pending["step"] = "start_id"
+            pending["step"] = "require_video"
             logger.debug(f"User {user_id} set deduplicate={deduplicate}, input was: {text}")
+            await event.respond(
+                "是否**仅转发含视频的消息**？\n"
+                "开启后跳过单张图片和纯图片组，含视频的混合媒体组整组转发\n\n"
+                "发送 `1` 开启\n"
+                "发送其他任意内容关闭"
+            )
+
+        elif step == "require_video":
+            pending["require_video"] = (text == "1")
+            pending["step"] = "include_topic_name"
+            await event.respond(
+                "是否在**标题携带来源话题名**？\n"
+                "有话题时按「自定义前缀 话题名 原标题」发送，不添加括号\n\n"
+                "发送 `1` 开启\n"
+                "发送其他任意内容关闭"
+            )
+
+        elif step == "include_topic_name":
+            pending["include_topic_name"] = (text == "1")
+            pending["step"] = "start_id"
             await event.respond(
                 "请输入**起始消息ID**（可选）：\n"
                 "从该消息ID之后开始转发\n"
@@ -232,7 +252,9 @@ class TaskWizardMixin:
                 target_topic_id=pending.get("topic_id"),
                 remove_hashtags=pending.get("remove_hashtags", False),
                 send_as_channel=pending.get("send_as_channel", False),
-                deduplicate=pending.get("deduplicate", False)
+                deduplicate=pending.get("deduplicate", False),
+                require_video=pending.get("require_video", False),
+                include_topic_name=pending.get("include_topic_name", False)
             )
 
             try:
@@ -255,6 +277,8 @@ class TaskWizardMixin:
             remove_text = f"删除Hashtag: {'是' if task.remove_hashtags else '否'}\n" if task.required_hashtags else ""
             send_as_text = f"以频道身份发送: {'是' if task.send_as_channel else '否'}\n"
             dedup_text = f"去重: {'是' if task.deduplicate else '否'}\n"
+            video_text = "仅转发含视频的消息: 开启\n" if task.require_video else ""
+            topic_name_text = "标题携带来源话题名: 开启\n" if task.include_topic_name else ""
             start_text = f"起始ID: {start_id}\n" if start_id > 0 else ""
             await event.respond(
                 f"✅ **任务添加成功！**\n\n"
@@ -270,6 +294,8 @@ class TaskWizardMixin:
                 f"{remove_text}"
                 f"{send_as_text}"
                 f"{dedup_text}"
+                f"{video_text}"
+                f"{topic_name_text}"
                 f"{start_text}",
                 buttons=buttons
             )

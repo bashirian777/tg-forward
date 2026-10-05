@@ -16,9 +16,6 @@ class Forwarder:
         self.progress_tracker = progress_tracker
         self._group_semaphore = group_semaphore if group_semaphore is not None else asyncio.Semaphore(1)
         self._running = False
-        self._paused = False
-        self._resume_event = asyncio.Event()
-        self._resume_event.set()
         self._ordered_ids = None
         self.error = ""
         self.album_settle_seconds = 2.0
@@ -75,18 +72,12 @@ class Forwarder:
                 await asyncio.sleep(self.album_settle_seconds)
         return messages
 
-    async def _wait_ready(self):
-        await self._resume_event.wait()
-        return self._running
-
     async def run_task(self, task: ForwardTask):
         self._running = True
         self.error = ""
         failures = 0
         try:
             while self._running:
-                if not await self._wait_ready():
-                    break
                 checkpoint = self.progress_tracker.get_last_message_id(task.task_id)
                 try:
                     messages = await self._fetch_batch(task, checkpoint)
@@ -96,7 +87,7 @@ class Forwarder:
                     self._ordered_ids = [m.id for m in messages]
                     failed = False
                     for original_group in self._group_messages(messages):
-                        if not await self._wait_ready():
+                        if not self._running:
                             break
                         done = self.progress_tracker.completed_ids(task.task_id)
                         if all(m.id in done or m.id <= self.progress_tracker.get_last_message_id(task.task_id) for m in original_group):
@@ -107,11 +98,6 @@ class Forwarder:
                             self.progress_tracker.complete_group(task.task_id, [m.id for m in original_group], "topic", ordered_ids=self._ordered_ids)
                             continue
                         async with self._group_semaphore:
-                            # Never start a new send after pausing while queued.
-                            if self._paused:
-                                # Re-fetch from the safe checkpoint after resume,
-                                # preserving order instead of moving to the next group.
-                                break
                             if not self._running:
                                 break
                             self.progress_tracker.begin_transfer(task.task_id, [m.id for m in group], sum(self.message_handler.is_media_message(m) for m in group))
@@ -149,11 +135,12 @@ class Forwarder:
                 filter_keywords=task.filter_keywords, required_hashtags=task.required_hashtags,
                 source_topic_id=task.source_topic_id, target_topic_id=task.target_topic_id,
                 remove_hashtags=task.remove_hashtags, send_as_channel=task.send_as_channel,
-                deduplicate=task.deduplicate, hide_source=task.hide_source,
+                deduplicate=task.deduplicate, hide_source=task.hide_source, require_video=task.require_video,
+                include_topic_name=task.include_topic_name,
             )
             if not result.success:
                 return "failed"
-            outcome = result.method if result.method in {"skip", "filtered", "no_hashtag", "duplicate"} else "forwarded"
+            outcome = result.method if result.method in {"skip", "filtered", "no_hashtag", "no_video", "duplicate"} else "forwarded"
             ids = [m.id for m in (original_group or messages)]
             self.progress_tracker.complete_group(task.task_id, ids, outcome, result.forwarded_count if outcome == "forwarded" else 0, self._ordered_ids)
             if outcome == "forwarded":
@@ -171,20 +158,7 @@ class Forwarder:
 
     def stop(self):
         self._running = False
-        self._resume_event.set()
-
-    def pause(self):
-        self._paused = True
-        self._resume_event.clear()
-
-    def resume(self):
-        self._paused = False
-        self._resume_event.set()
 
     @property
     def is_running(self):
         return self._running
-
-    @property
-    def is_paused(self):
-        return self._paused

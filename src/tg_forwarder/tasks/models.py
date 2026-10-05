@@ -22,6 +22,8 @@ class ForwardTask:
     remove_hashtags: bool = False
     send_as_channel: bool = False
     deduplicate: bool = False
+    require_video: bool = False
+    include_topic_name: bool = False
 
     def to_dict(self):
         return asdict(self)

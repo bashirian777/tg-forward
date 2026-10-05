@@ -28,7 +28,7 @@ async function logout() { try { await auth.logout() } catch (e) { ui.notify((e a
       </div>
     </aside>
     <main class="main-area"><header class="topbar"><div><h1 id="page-title">{{ route.meta.title }}</h1><p id="page-description">{{ route.meta.description }}</p></div>
-      <div class="topbar-actions"><button id="refresh-btn" class="icon-btn" aria-label="刷新数据" @click="data.changed"><Icon name="refresh" /></button><button id="theme-btn" class="icon-btn" :aria-label="theme === 'dark' ? '切换浅色主题' : '切换深色主题'" @click="toggleTheme"><Icon :name="theme === 'dark' ? 'sun' : 'moon'" /></button><button id="new-task-btn" class="btn primary" @click="form = true"><Icon name="plus" /><span>新建任务</span></button></div>
+      <div class="topbar-actions"><button id="refresh-btn" class="icon-btn" :class="{ busy: data.refreshing }" :aria-busy="data.refreshing" :disabled="data.refreshing" aria-label="刷新数据" @click="data.refresh"><Icon name="refresh" /></button><button id="theme-btn" class="icon-btn" :aria-label="theme === 'dark' ? '切换浅色主题' : '切换深色主题'" @click="toggleTheme"><Icon :name="theme === 'dark' ? 'sun' : 'moon'" /></button><button id="new-task-btn" class="btn primary" @click="form = true"><Icon name="plus" /><span>新建任务</span></button></div>
     </header><div class="page-content">
       <div v-if="poll.error.value" class="banner" role="alert">连接状态未更新，保留上次结果。{{ poll.error.value }}</div>
       <RouterView />

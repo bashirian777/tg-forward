@@ -89,6 +89,19 @@ class TaskManager:
     def task_snapshots(self):
         return self._queries.task_snapshots()
 
+    def tasks_view(self):
+        return self._queries.tasks_view()
+
+    def set_task_sort_mode(self, mode):
+        self.config_manager.db.set_task_sort_mode(mode)
+        self.config_manager.db.log_operation("task_sort", after_data={"sort_mode": mode})
+
+    def move_task(self, task_id, direction):
+        self.require_task(task_id)
+        self.config_manager.db.move_task(task_id, direction)
+        self.config_manager.reload()
+        self.config_manager.db.log_operation("task_move", task_id=task_id, after_data={"direction": direction})
+
     def config_snapshot(self):
         return self._queries.config_snapshot()
 
@@ -174,28 +187,6 @@ class TaskManager:
         logger.info(f"Started task {task_id}")
 
     @serialized_action
-    async def pause_task(self, task_id: str) -> None:
-        """Pause a running task."""
-        if task_id not in self._tasks or self._tasks[task_id].done():
-            raise OperationError("task_not_running", "Only a running task can be paused", 409)
-
-        self._forwarders[task_id].pause()
-        self._statuses[task_id] = "paused"
-        self.config_manager.db.log_operation("pause_task", task_id=task_id)
-        logger.info(f"Paused task {task_id}")
-
-    @serialized_action
-    async def resume_task(self, task_id: str) -> None:
-        """Resume a paused task."""
-        if task_id not in self._tasks or self._tasks[task_id].done() or not self._forwarders[task_id].is_paused:
-            raise OperationError("task_not_paused", "Only a paused task can be resumed; start stopped tasks", 409)
-
-        self._forwarders[task_id].resume()
-        self._statuses[task_id] = "running"
-        self.config_manager.db.log_operation("resume_task", task_id=task_id)
-        logger.info(f"Resumed task {task_id}")
-
-    @serialized_action
     async def stop_task(self, task_id: str) -> None:
         self.require_task(task_id)
         await self._stop_task(task_id)
@@ -240,7 +231,7 @@ class TaskManager:
         if runtime and runtime.done():
             status = "error" if forwarder and forwarder.error else "stopped"
         elif runtime:
-            status = "paused" if forwarder.is_paused else "running"
+            status = "running"
 
         return TaskStatus(
             task_id=task_id,
@@ -341,15 +332,11 @@ class TaskManager:
     async def retry_transfer(self, task_id):
         self.require_task(task_id)
         was_active = self.is_active(task_id)
-        was_paused = was_active and self._forwarders[task_id].is_paused
         await self._stop_task(task_id)
         self.clear_transfer(task_id)
         if was_active:
             async with self._settings_lock:
                 await self._start_task(task_id)
-                if was_paused:
-                    self._forwarders[task_id].pause()
-                    self._statuses[task_id] = "paused"
         return {"resume_from": self.progress_tracker.get_last_message_id(task_id), "restarted": was_active}
 
     @serialized_action

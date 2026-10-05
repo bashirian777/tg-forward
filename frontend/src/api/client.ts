@@ -1,4 +1,4 @@
-import type { AuthInfo, TaskSnapshot, TaskConfig, RuntimeConfig, RuntimeConfigUpdate, Deployment, SystemInfo, OperationLog, TaskError, CleanupResult } from '../types/api'
+import type { AuthInfo, TaskSnapshot, TaskList, TaskSortMode, TaskConfig, RuntimeConfig, RuntimeConfigUpdate, Deployment, SystemInfo, OperationLog, TaskError, CleanupResult } from '../types/api'
 
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number, public fields: Record<string, string> = {}) { super(message) }
@@ -48,7 +48,9 @@ export const api = {
   session: () => request<AuthInfo>('/api/auth'),
   login: (password: string) => request<AuthInfo>('/api/auth', { method: 'POST', data: { password } }),
   logout: () => request('/api/auth', { method: 'DELETE' }),
-  tasks: (signal?: AbortSignal) => request<TaskSnapshot[]>('/api/tasks', { signal }),
+  tasks: (signal?: AbortSignal) => request<TaskList>('/api/tasks?view=1', { signal }),
+  sortTasks: (sort_mode: TaskSortMode) => request('/api/task-order', { method: 'PUT', data: { sort_mode } }),
+  moveTask: (id: string, direction: 'up' | 'down') => request(taskPath(id) + '/move', { method: 'POST', data: { direction } }),
   task: (id: string) => request<TaskSnapshot>(taskPath(id)),
   create: (data: TaskConfig) => request('/api/tasks', { method: 'POST', data }),
   update: (id: string, data: TaskConfig & { revision: number; source_reset?: { last_message_id: number; clear_dedup: boolean } }) => request(taskPath(id), { method: 'PUT', data }),

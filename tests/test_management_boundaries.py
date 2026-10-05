@@ -23,7 +23,7 @@ def shared_queries(tmp_path):
     config = SimpleNamespace(tasks=[task], web_password="secret",
         settings_dict=lambda: dict(payload, web_password="secret"))
     database = SimpleNamespace(path=str(tmp_path / "forwarder.db"),
-        dedup_count=lambda _: 2, list_dedup=lambda *_: [payload],
+        get_metadata=lambda _: "manual", dedup_count=lambda _: 2, list_dedup=lambda *_: [payload],
         list_logs=lambda *_: [payload])
     configs = SimpleNamespace(get_config=lambda: config, get_task=lambda _: task,
         task_revision=lambda _: 3, revision=4, db=database)

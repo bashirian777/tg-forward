@@ -1,5 +1,6 @@
 """Assemble management reads without exposing live transfer or config state."""
 from copy import deepcopy
+from datetime import datetime, timezone
 import os
 import shutil
 import time
@@ -32,8 +33,27 @@ class ManagementQueries:
             errors=self.get_task_error_summary(task_id),
             revision=self.config_manager.task_revision(task_id)))
 
-    def task_snapshots(self):
-        return [self.task_snapshot(task.task_id) for task in self.list_tasks()]
+    def task_sort_mode(self):
+        return self.config_manager.db.get_metadata("task_sort_mode") or "manual"
+
+    def task_snapshots(self, sort_mode=None):
+        tasks = [self.task_snapshot(task.task_id) for task in self.list_tasks()]
+        if (sort_mode or self.task_sort_mode()) == "recent":
+            def last_forward(task):
+                value = task["progress"]["last_forward_time"]
+                if not value:
+                    return float("-inf")
+                try:
+                    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return timestamp.replace(tzinfo=timezone.utc).timestamp() if timestamp.tzinfo is None else timestamp.timestamp()
+                except (ValueError, TypeError, OverflowError):
+                    return float("-inf")
+            tasks.sort(key=last_forward, reverse=True)
+        return tasks
+
+    def tasks_view(self):
+        mode = self.task_sort_mode()
+        return {"tasks": self.task_snapshots(mode), "sort_mode": mode}
 
     def config_snapshot(self):
         return self.settings.snapshot()

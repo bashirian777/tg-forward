@@ -138,6 +138,15 @@ class Database:
                 columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if "revision" not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+            # Serialize the one-time position migration with other database openers.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+            if "sort_order" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+                task_ids = [row[0] for row in db.execute("SELECT task_id FROM tasks ORDER BY task_id")]
+                db.executemany("UPDATE tasks SET sort_order=? WHERE task_id=?",
+                    [(position, task_id) for position, task_id in enumerate(task_ids)])
+            db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('task_sort_mode','manual')")
             db.execute(
                 "INSERT OR IGNORE INTO app_settings(id, data, updated_at) "
                 "SELECT id, data, updated_at FROM app_config"
@@ -151,6 +160,32 @@ class Database:
         with self.connection() as db:
             row = db.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else None
+
+    def set_task_sort_mode(self, mode):
+        if mode not in ("manual", "recent"):
+            raise ValueError("排序方式必须是 manual 或 recent")
+        with self.connection() as db:
+            db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('task_sort_mode',?)", (mode,))
+
+    def move_task(self, task_id, direction):
+        if direction not in ("up", "down"):
+            raise ValueError("移动方向必须是 up 或 down")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            mode = db.execute("SELECT value FROM metadata WHERE key='task_sort_mode'").fetchone()
+            if mode and mode[0] != "manual":
+                raise ValueError("切换到手动顺序后可移动任务")
+            rows = db.execute("SELECT task_id,sort_order FROM tasks ORDER BY sort_order,task_id").fetchall()
+            position = next((i for i, row in enumerate(rows) if row["task_id"] == task_id), None)
+            if position is None:
+                raise ValueError(f"Task {task_id} not found")
+            neighbor = position + (-1 if direction == "up" else 1)
+            if 0 <= neighbor < len(rows):
+                current, adjacent = rows[position], rows[neighbor]
+                db.executemany("UPDATE tasks SET sort_order=? WHERE task_id=?", [
+                    (adjacent["sort_order"], current["task_id"]),
+                    (current["sort_order"], adjacent["task_id"]),
+                ])
 
     @staticmethod
     def _validate_settings(data):
@@ -182,7 +217,7 @@ class Database:
             app = db.execute("SELECT data,revision FROM app_settings WHERE id=1").fetchone()
             if app is None:
                 raise FileNotFoundError("Database is not initialized; run 'init'")
-            tasks = db.execute("SELECT task_id,data,revision FROM tasks ORDER BY task_id").fetchall()
+            tasks = db.execute("SELECT task_id,data,revision FROM tasks ORDER BY sort_order,task_id").fetchall()
             return (json.loads(app["data"]), app["revision"],
                 {row["task_id"]: json.loads(row["data"]) for row in tasks},
                 {row["task_id"]: row["revision"] for row in tasks})
@@ -226,7 +261,7 @@ class Database:
 
     def list_tasks(self) -> list:
         with self.connection() as db:
-            return [json.loads(row["data"]) for row in db.execute("SELECT data FROM tasks ORDER BY task_id")]
+            return [json.loads(row["data"]) for row in db.execute("SELECT data FROM tasks ORDER BY sort_order,task_id")]
 
     def get_task(self, task_id: str) -> Optional[dict]:
         with self.connection() as db:
@@ -240,7 +275,8 @@ class Database:
             old = db.execute("SELECT data FROM tasks WHERE task_id=?", (data["task_id"],)).fetchone()
             validate_source_reset(json.loads(old["data"]) if old else None, data, source_reset)
             db.execute(
-                "INSERT INTO tasks(task_id, data, updated_at) VALUES(?, ?, ?) "
+                "INSERT INTO tasks(task_id, data, updated_at, sort_order) "
+                "VALUES(?, ?, ?, (SELECT COALESCE(MAX(sort_order),-1)+1 FROM tasks)) "
                 "ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at, revision=tasks.revision+1",
                 (data["task_id"], json.dumps(data, ensure_ascii=False), self._now()),
             )

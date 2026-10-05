@@ -92,6 +92,8 @@ def create_parser():
     add.add_argument("--source", "-s", type=int, required=True)
     add.add_argument("--target", "-t", type=int, required=True)
     add.add_argument("--source-topic", type=int)
+    add.add_argument("--require-video", action="store_true", help="Skip photo-only messages and albums; forward mixed albums containing video")
+    add.add_argument("--include-topic-name", action="store_true", help="Include the source forum topic name after the caption prefix")
     add.add_argument("--min-delay", type=float, default=10.0)
     add.add_argument("--max-delay", type=float, default=20.0)
     commands.add_parser("list", help="List tasks and checkpoints")
@@ -158,7 +160,7 @@ async def main(argv=None):
     tracker = ProgressTracker(database=manager.db)
     tracker.load_progress()
     if args.command == "add":
-        task = ForwardTask(args.task_id, args.source, args.target, args.min_delay, args.max_delay, source_topic_id=args.source_topic)
+        task = ForwardTask(args.task_id, args.source, args.target, args.min_delay, args.max_delay, source_topic_id=args.source_topic, require_video=args.require_video, include_topic_name=args.include_topic_name)
         with session_guard(startup.session_path):
             tasks = TaskManager(create_user_client(startup, database=manager.db), manager, tracker, temp_dir=manager.get_config().temp_dir)
             tasks.create_task(task)

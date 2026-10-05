@@ -11,8 +11,8 @@ const props = defineProps<{ task?: TaskSnapshot }>(), emit = defineEmits<{ close
 const store = useData(), ui = useUI(), error = ref(''), busy = ref(false), conflict = ref(false)
 const defaults: TaskConfig = { task_id: '', source_channel: 0, target_channel: 0, min_delay: 10, max_delay: 20,
  enabled: true, note: '', hide_source: true, caption_prefix: '', filter_keywords: [], required_hashtags: [],
- target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false }
-const form = reactive<TaskConfig>(structuredClone(toRaw(props.task?.config || defaults)))
+ target_topic_id: null, source_topic_id: null, remove_hashtags: false, send_as_channel: false, deduplicate: false, require_video: false, include_topic_name: false }
+const form = reactive<TaskConfig>(structuredClone({ ...defaults, ...toRaw(props.task?.config || {}) }))
 const original = ref<TaskConfig | undefined>(props.task ? structuredClone(toRaw(props.task.config)) : undefined), revision = ref(props.task?.revision || 0)
 const fieldConflicts = ref<FieldConflict[]>([])
 const unresolved = computed(() => fieldConflicts.value.some(field => !field.choice))
@@ -21,7 +21,7 @@ const keywords = ref(form.filter_keywords.join('\n')), hashtags = ref(form.requi
 const startId = ref(0), clearDedup = ref(true)
 const sourceChanged = computed(() => !!original.value && (form.source_channel !== original.value.source_channel || form.source_topic_id !== original.value.source_topic_id))
 const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean)
-watch(() => form.hide_source, hide => { if (!applyingMerge && !hide) { form.caption_prefix = ''; form.remove_hashtags = false; form.send_as_channel = false } }, { flush: 'sync' })
+watch(() => form.hide_source, hide => { if (!applyingMerge && !hide) { form.caption_prefix = ''; form.remove_hashtags = false; form.send_as_channel = false; form.include_topic_name = false } }, { flush: 'sync' })
 watch(() => form.send_as_channel, enabled => { if (!applyingMerge && enabled) form.hide_source = true }, { flush: 'sync' })
 watch(hashtags, text => { if (!applyingMerge && !lines(text).length) form.remove_hashtags = false }, { flush: 'sync' })
 const numbers = [
@@ -35,9 +35,11 @@ const switches = [
  { key: 'hide_source', label: '隐藏转发来源', description: '目标消息不显示“转发自”' },
  { key: 'remove_hashtags', label: '删除已匹配 Hashtag', description: '从转发描述中移除匹配的标签' },
  { key: 'send_as_channel', label: '以目标频道身份发送', description: '需要登录账号具有相应管理员权限' },
+ { key: 'include_topic_name', label: '标题携带来源话题名', description: '需隐藏来源；按「自定义前缀 话题名 原标题」发送，不添加括号，无话题时保持原样' },
+ { key: 'require_video', label: '仅转发含视频的消息', description: '跳过单张图片和纯图片组；含视频的混合媒体组整组转发' },
  { key: 'deduplicate', label: '媒体 ID 去重', description: '识别同一 Telegram 媒体；重新上传的相同内容可能无法识别' },
 ] as const
-function locked(key: string) { return key === 'hide_source' && form.send_as_channel || key === 'remove_hashtags' && (!form.hide_source || !lines(hashtags.value).length) || key === 'send_as_channel' && !form.hide_source }
+function locked(key: string) { return key === 'hide_source' && form.send_as_channel || key === 'remove_hashtags' && (!form.hide_source || !lines(hashtags.value).length) || (key === 'send_as_channel' || key === 'include_topic_name') && !form.hide_source }
 const conflictLabels: Record<string, string> = {
   ...Object.fromEntries([...numbers, ...switches].map(field => [field.key, field.label])),
   task_id: '任务 ID', note: '任务名称 / 备注', source_topic_id: '来源话题 ID', target_topic_id: '目标话题 ID',
@@ -80,6 +82,7 @@ async function submit() {
   if (![form.source_channel, form.target_channel].every(value => Number.isSafeInteger(value) && value < 0)) { error.value = '来源和目标频道 ID 必须是负整数'; return }
   if (form.source_channel === form.target_channel) { error.value = '来源与目标频道不能相同'; return }
   if (form.min_delay > form.max_delay) { error.value = '最小延迟不能大于最大延迟'; return }
+  if (!form.hide_source && form.include_topic_name) { error.value = '请开启隐藏转发来源，或关闭标题携带来源话题名'; return }
   const payload = inputConfig()
   let source_reset: { last_message_id: number; clear_dedup: boolean } | undefined
   if (sourceChanged.value) {
@@ -107,8 +110,8 @@ async function submit() {
         </div>
       </div></fieldset>
       <details class="advanced-fields" id="task-advanced" :open="!!task"><summary>话题、描述与过滤规则</summary><div class="form-grid">
-        <div class="form-field"><label for="task-form-source-topic">来源话题 ID</label><input id="task-form-source-topic" :value="form.source_topic_id" @input="form.source_topic_id = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null" type="number" min="1" step="1" placeholder="可选" /></div>
-        <div class="form-field"><label for="task-form-topic">目标话题 ID</label><input id="task-form-topic" :value="form.target_topic_id" @input="form.target_topic_id = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null" type="number" min="1" step="1" placeholder="可选" /></div>
+        <div class="form-field"><label for="task-form-source-topic">来源话题 ID</label><input id="task-form-source-topic" :value="form.source_topic_id" @input="form.source_topic_id = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null" type="number" min="1" step="1" placeholder="可选" aria-describedby="source-topic-hint" /><span id="source-topic-hint" class="hint">留空时转发所有话题（含 General）；填写后仅转发指定话题。</span></div>
+        <div class="form-field"><label for="task-form-topic">目标话题 ID</label><input id="task-form-topic" :value="form.target_topic_id" @input="form.target_topic_id = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null" type="number" min="1" step="1" placeholder="可选" aria-describedby="target-topic-hint" /><span id="target-topic-hint" class="hint">目标为论坛群组时，留空发送到 General（默认话题）；填写后发送到指定话题。</span></div>
         <div class="form-field full"><label for="task-form-prefix">描述前缀</label><input id="task-form-prefix" v-model="form.caption_prefix" :disabled="!form.hide_source" placeholder="转发描述前添加的文字" /><span v-if="!form.hide_source" class="hint">显示来源时保留原描述</span></div>
         <div class="form-field"><label for="task-form-keywords">跳过关键词</label><textarea id="task-form-keywords" v-model="keywords" placeholder="每行一个关键词" /><span class="hint">包含任意一个关键词时跳过</span></div>
         <div class="form-field"><label for="task-form-hashtags">必须包含的 Hashtag</label><textarea id="task-form-hashtags" v-model="hashtags" placeholder="每行一个标签" /><span class="hint">至少包含一个才转发，留空不过滤</span></div>

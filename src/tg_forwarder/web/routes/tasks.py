@@ -7,7 +7,19 @@ blueprint = Blueprint("tasks", __name__, url_prefix="/api")
 
 @blueprint.route("/tasks", methods=["GET", "POST"])
 def tasks():
-    return invoke("tasks") if request.method == "GET" else invoke("task.create", {"data": body()}, 201)
+    if request.method == "GET":
+        return invoke("tasks.view" if request.args.get("view") == "1" else "tasks")
+    return invoke("task.create", {"data": body()}, 201)
+
+
+@blueprint.put("/task-order")
+def order():
+    return invoke("tasks.sort", {"data": body()})
+
+
+@blueprint.post("/tasks/<task_id>/move")
+def move(task_id):
+    return invoke("task.move", {"task_id": task_id, "data": body()})
 
 
 @blueprint.route("/tasks/<task_id>", methods=["GET", "PUT", "DELETE"])

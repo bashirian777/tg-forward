@@ -6,9 +6,12 @@ import re
 import shutil
 import time
 from functools import wraps
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, List
-from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument, TextWithEntities
+from telethon.extensions import markdown
+from telethon.helpers import add_surrogate
 from telethon.errors import FloodWaitError
 
 from tg_forwarder.telegram.client import TelegramClientWrapper
@@ -128,6 +131,14 @@ class MessageHandler:
 
         return False
 
+    @staticmethod
+    def is_video_message(message: Message) -> bool:
+        media = getattr(message, "media", None)
+        if not isinstance(media, MessageMediaDocument):
+            return False
+        document = media.document
+        return bool(document and getattr(document, "mime_type", "").startswith("video/"))
+
     def _apply_prefix(self, text: str, prefix: str) -> str:
         """Apply prefix to caption text."""
         if not prefix:
@@ -135,6 +146,35 @@ class MessageHandler:
         if not text:
             return prefix
         return f"{prefix} {text}"
+
+    async def _topic_caption(self, messages, source_channel, prefix, hashtags_to_remove):
+        name = await self.client.get_source_topic_name(source_channel, messages[0])
+        if not name:
+            return None
+        text = next((m.text or m.message for m in messages if m.text or m.message), "")
+        if hashtags_to_remove:
+            prefix = self._remove_hashtags_from_text(prefix, hashtags_to_remove)
+            text = self._remove_hashtags_from_text(text, hashtags_to_remove)
+        # Parse existing formatting separately so a topic title is always literal text.
+        before, before_entities = markdown.parse(prefix or "")
+        after, after_entities = markdown.parse(text or "")
+        parts, entities = [], []
+        offset = 0
+        for value, formatting in ((before, before_entities), (name, []), (after, after_entities)):
+            if not value:
+                continue
+            if parts:
+                offset += 1
+            for entity in deepcopy(formatting):
+                entity.offset += offset
+                entities.append(entity)
+            parts.append(value)
+            offset += len(add_surrogate(value))
+        caption = " ".join(parts)
+        if len(caption) > await self.client.get_caption_limit():
+            logger.warning("Source topic name omitted from message %s: caption would exceed limit", messages[0].id)
+            return None
+        return TextWithEntities(caption, entities)
 
     @staticmethod
     def _hashtag_pattern(hashtag):
@@ -236,13 +276,17 @@ class MessageHandler:
                                     send_as_channel: bool = False,
                                     deduplicate: bool = False,
                                     source_topic_id: int = None,
-                                    hide_source: bool = True) -> ForwardResult:
+                                    hide_source: bool = True,
+                                    require_video: bool = False,
+                                    include_topic_name: bool = False) -> ForwardResult:
         """
         Forward a group of messages (single or album).
         Only forwards if there's media content.
         Skips if message contains filter keywords.
         Skips if message doesn't contain required hashtags (when specified).
         Skips if deduplicate is enabled and media was already sent.
+        With require_video, the source group must contain at least one video.
+        Mixed groups retain their photos; normal per-media dedup still applies.
         """
         messages = self._filter_source_topic(messages, source_topic_id)
         if not messages:
@@ -266,6 +310,12 @@ class MessageHandler:
             logger.debug(f"No media in message group, skipping")
             return ForwardResult(success=True, method="skip")
 
+        # Qualify the source group before per-media deduplication; retain
+        # accompanying photos in a mixed video/photo album.
+        if require_video and not any(self.is_video_message(m) for m in media_messages):
+            logger.debug("Message group skipped - no video")
+            return ForwardResult(success=True, method="no_video")
+
         # Check for duplicates if enabled. If only part of a group is
         # duplicated, forward the remaining new media instead of dropping
         # the whole album.
@@ -281,6 +331,8 @@ class MessageHandler:
 
         # Determine send_as entity (target channel if send_as_channel is True)
         send_as = target_channel if send_as_channel else None
+        caption = (await self._topic_caption(media_messages, source_channel, caption_prefix, hashtags_to_remove)
+                   if include_topic_name and hide_source else None)
 
         if not hide_source:
             await self.client.send_existing_media(target_channel, [self.client.input_media_with_cover(m) for m in media_messages],
@@ -288,10 +340,10 @@ class MessageHandler:
             result = ForwardResult(True, "forward", forwarded_count=len(media_messages))
         # Single message
         elif len(media_messages) == 1:
-            result = await self._forward_single(media_messages[0], target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
+            result = await self._forward_single(media_messages[0], target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as, caption=caption)
         else:
             # Album (multiple media)
-            result = await self._forward_album(media_messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
+            result = await self._forward_album(media_messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as, caption=caption)
 
         # Record the number of media actually forwarded (after duplicate
         # filtering only the newly forwarded items are in media_messages).
@@ -308,16 +360,16 @@ class MessageHandler:
                               caption_prefix: str = "", task_id: str = None,
                               target_topic_id: int = None,
                               hashtags_to_remove: List[str] = None,
-                              send_as: int = None) -> ForwardResult:
+                              send_as: int = None, *, caption=None) -> ForwardResult:
         """Forward a single media message."""
         # Try copy first (using bot if available)
-        success = await self.copy_message(message, target_channel, caption_prefix, target_topic_id, hashtags_to_remove, send_as, task_id)
+        success = await self.copy_message(message, target_channel, caption_prefix, target_topic_id, hashtags_to_remove, send_as, task_id, caption=caption)
         if success:
             return ForwardResult(success=True, method="copy")
 
         # Fallback to download
         logger.info(f"Copy failed for message {message.id}, trying download")
-        success = await self.download_and_send(message, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
+        success = await self.download_and_send(message, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as, caption=caption)
         if success:
             return ForwardResult(success=True, method="download")
 
@@ -327,7 +379,7 @@ class MessageHandler:
                              caption_prefix: str = "", task_id: str = None,
                              target_topic_id: int = None,
                              hashtags_to_remove: List[str] = None,
-                             send_as: int = None) -> ForwardResult:
+                             send_as: int = None, *, caption=None) -> ForwardResult:
         """Forward an album (media group) as a single unit."""
         try:
             target_entity = await self.client.get_entity(target_channel)
@@ -335,21 +387,17 @@ class MessageHandler:
             # Collect all media from the album
             media_list = [self.client.input_media_with_cover(m) for m in messages]
 
-            # Use caption from first message that has one
-            caption = None
-            for m in messages:
-                text = m.text or m.message
-                if text:
-                    caption = self._apply_prefix(text, caption_prefix)
-                    break
-
-            # If no original caption but has prefix, use prefix as caption
-            if caption is None and caption_prefix:
-                caption = caption_prefix
-
-            # Remove hashtags if specified
-            if caption and hashtags_to_remove:
-                caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
+            if caption is None:
+                # Use caption from first message that has one.
+                for m in messages:
+                    text = m.text or m.message
+                    if text:
+                        caption = self._apply_prefix(text, caption_prefix)
+                        break
+                if caption is None and caption_prefix:
+                    caption = caption_prefix
+                if caption and hashtags_to_remove:
+                    caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
             await self.client.send_existing_media(target_entity, media_list, task_id=task_id,
                 message_ids=[m.id for m in messages], caption=caption, reply_to=target_topic_id, send_as=send_as)
@@ -363,14 +411,14 @@ class MessageHandler:
             if not isinstance(e, COPY_FALLBACK_ERRORS):
                 raise
             logger.warning(f"Album copy failed: {e}, trying individual download")
-            return await self._download_and_send_album(messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as)
+            return await self._download_and_send_album(messages, target_channel, caption_prefix, task_id, target_topic_id, hashtags_to_remove, send_as, caption=caption)
 
     @disk_guard
     async def _download_and_send_album(self, messages: List[Message], target_channel: int,
                                        caption_prefix: str = "", task_id: str = None,
                                        target_topic_id: int = None,
                                        hashtags_to_remove: List[str] = None,
-                                       send_as: int = None) -> ForwardResult:
+                                       send_as: int = None, *, caption=None) -> ForwardResult:
         """Download and upload album items one at a time before sending."""
         file_paths = []
         all_artwork_paths = []
@@ -378,17 +426,16 @@ class MessageHandler:
         try:
             target_entity = await self.client.get_entity(target_channel)
 
-            caption = None
-            for m in messages:
-                text = m.text or m.message
-                if text:
-                    caption = self._apply_prefix(text, caption_prefix)
-                    break
-
-            if caption is None and caption_prefix:
-                caption = caption_prefix
-            if caption and hashtags_to_remove:
-                caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
+            if caption is None:
+                for m in messages:
+                    text = m.text or m.message
+                    if text:
+                        caption = self._apply_prefix(text, caption_prefix)
+                        break
+                if caption is None and caption_prefix:
+                    caption = caption_prefix
+                if caption and hashtags_to_remove:
+                    caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
             media_messages = [m for m in messages if self.is_media_message(m)]
             total_files = len(media_messages)
@@ -483,7 +530,9 @@ class MessageHandler:
                              remove_hashtags: bool = False,
                              send_as_channel: bool = False,
                              deduplicate: bool = False,
-                             source_topic_id: int = None) -> ForwardResult:
+                             source_topic_id: int = None,
+                             require_video: bool = False,
+                             include_topic_name: bool = False) -> ForwardResult:
         """
         Forward a message - only if it's media (photo/video).
         Skips text-only messages without delay.
@@ -499,20 +548,22 @@ class MessageHandler:
             remove_hashtags=remove_hashtags,
             send_as_channel=send_as_channel,
             deduplicate=deduplicate,
+            require_video=require_video,
+            include_topic_name=include_topic_name,
         )
 
     async def copy_message(self, message: Message, target_channel: int,
                           caption_prefix: str = "", target_topic_id: int = None,
                           hashtags_to_remove: List[str] = None,
-                          send_as: int = None, task_id: str = None) -> bool:
+                          send_as: int = None, task_id: str = None, *, caption=None) -> bool:
         """Copy message to target without showing source."""
         try:
             target_entity = await self.client.get_entity(target_channel)
-            text = message.text or message.message or ""
-            caption = self._apply_prefix(text, caption_prefix) if text else caption_prefix
-
-            if caption and hashtags_to_remove:
-                caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
+            if caption is None:
+                text = message.text or message.message or ""
+                caption = self._apply_prefix(text, caption_prefix) if text else caption_prefix
+                if caption and hashtags_to_remove:
+                    caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
             await self.client.send_existing_media(target_entity, self.client.input_media_with_cover(message),
                 task_id=task_id, message_ids=[message.id], caption=caption, reply_to=target_topic_id, send_as=send_as)
@@ -530,16 +581,16 @@ class MessageHandler:
                                caption_prefix: str = "", task_id: str = None,
                                target_topic_id: int = None,
                                hashtags_to_remove: List[str] = None,
-                               send_as: int = None) -> bool:
+                               send_as: int = None, *, caption=None) -> bool:
         """Fallback: Download and re-upload with metadata preserved."""
         file_path = None
         artwork = None
         try:
-            text = message.text or message.message or ""
-            caption = self._apply_prefix(text, caption_prefix) if text else caption_prefix
-
-            if caption and hashtags_to_remove:
-                caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
+            if caption is None:
+                text = message.text or message.message or ""
+                caption = self._apply_prefix(text, caption_prefix) if text else caption_prefix
+                if caption and hashtags_to_remove:
+                    caption = self._remove_hashtags_from_text(caption, hashtags_to_remove)
 
             cached = self._cached_upload(message, target_channel)
             if cached is not None:
