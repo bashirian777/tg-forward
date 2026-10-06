@@ -13,7 +13,7 @@ services:
       DB_PATH: /app/data/forwarder.db
       SESSION_PATH: /app/data/sessions/forwarder.session
     ports:
-      - "127.0.0.1:10082:10082"
+      - "${WEB_HOST:-0.0.0.0}:${WEB_PORT:-10082}:10082"
     volumes:
       - ./data:/app/data
       - ./temp:/app/temp

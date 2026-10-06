@@ -40,6 +40,8 @@ def test_env_precedence_paths_and_literal_password(tmp_path, monkeypatch):
     monkeypatch.chdir(elsewhere)
     config = StartupConfig.load(path, environ={"WEB_PORT": "54321"}, project_root=tmp_path)
     assert config.web_port == 54321
+    assert config.web_host == "0.0.0.0"
+    assert config.sources["WEB_HOST"] == "default"
     assert config.sources["WEB_PORT"] == "environment"
     assert config.sources["TG_API_HASH"] == ".env"
     assert config.sources["DB_PATH"] == "default"

@@ -17,7 +17,7 @@ DEFAULTS = {
     "TG_API_ID": "", "TG_API_HASH": "", "TG_PHONE": "",
     "TG_BOT_TOKEN": "", "TG_ADMIN_IDS": "", "TG_PROXY_URL": "",
     "DB_PATH": str(DEFAULT_DB_PATH), "SESSION_PATH": str(DEFAULT_SESSION_PATH),
-    "WEB_HOST": "127.0.0.1", "WEB_PORT": "10082", "WEB_INITIAL_PASSWORD": "", "WEB_TRUSTED_PROXY": "",
+    "WEB_HOST": "0.0.0.0", "WEB_PORT": "10082", "WEB_INITIAL_PASSWORD": "", "WEB_TRUSTED_PROXY": "",
 }
 
 
@@ -67,7 +67,7 @@ class StartupConfig:
     admin_ids: Tuple[int, ...] = ()
     db_path: Path = PROJECT_ROOT / DEFAULT_DB_PATH
     session_path: Path = PROJECT_ROOT / DEFAULT_SESSION_PATH
-    web_host: str = "127.0.0.1"
+    web_host: str = "0.0.0.0"
     web_port: int = 10082
     web_trusted_proxy: str = ""
     proxy_url: str = field(default="", repr=False)
