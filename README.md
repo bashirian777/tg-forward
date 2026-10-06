@@ -51,22 +51,53 @@ docker compose logs -f forwarder
 
 ## 源码部署
 
-支持 Linux，需要 Python 3.9 及以上（推荐 3.12）、Node 22.12 及以上和 npm。
+支持 Linux，需要 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node 22.12 及以上和 npm。推荐 Python 3.12，uv 会在需要时自动下载。
+
+在项目根目录执行以下命令，创建并激活环境、安装依赖、构建前端：
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m scripts.build_frontend
-.venv/bin/tg-forward init
-.venv/bin/tg-forward login
-.venv/bin/tg-forward serve
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r pyproject.toml
+python -m scripts.build_frontend
 ```
 
-后台运行或重启：
+完成上面的[配置账号](#配置账号)步骤，填写 `.env`，然后初始化数据库并登录 Telegram：
 
 ```bash
-bash restart.sh
+python main.py init
+python main.py login
 ```
+
+`login` 在终端提示输入验证码；开启两步验证时，再输入 Telegram 两步验证密码。密码输入时不会显示字符，出现 `Telegram login completed` 表示登录成功。已有有效会话时无需再次登录。
+
+前台运行：
+
+```bash
+python main.py serve
+```
+
+日志显示在当前终端，按 `Ctrl+C` 停止。需要后台运行时，先退出前台进程，再执行：
+
+```bash
+bash run.sh start
+```
+
+脚本会在后台启动；已运行时不会重复启动，关闭终端后仍会运行。日常管理命令：
+
+```bash
+bash run.sh stop       # 停止，等待任务和 worker 退出
+bash run.sh restart    # 重启
+bash run.sh status     # 查看运行状态
+```
+
+查看后台日志：
+
+```bash
+tail -f data/logs/forwarder.log
+```
+
+重新打开终端后，运行 Python 命令前执行 `source .venv/bin/activate`。`run.sh` 自动使用项目的 `.venv`，无需激活。
 
 ## 开始使用
 

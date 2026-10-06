@@ -15,6 +15,7 @@ def test_waitress_serves_assets_and_api_on_one_port_and_exits(tmp_path):
     code = '''
 from dataclasses import replace
 from pathlib import Path
+import runpy
 import sys
 from tg_forwarder.storage.config_store import ConfigManager
 from tg_forwarder.runtime import server
@@ -40,8 +41,8 @@ def capture(*args, **kwargs):
 server.create_server = capture
 cli.StartupConfig.load = lambda *_: replace(startup(root),
     db_path=Path(cm.db.path), session_path=root / "forwarder.session", web_port=0, web_trusted_proxy="127.0.0.1")
-sys.argv = ["tg-forward", "--log-level", "ERROR", "serve"]
-cli.run()
+sys.argv = ["main.py", "--log-level", "ERROR", "serve"]
+runpy.run_path("main.py", run_name="__main__")
 '''
     process = subprocess.Popen([sys.executable, "-u", "-c", code, str(tmp_path)], cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

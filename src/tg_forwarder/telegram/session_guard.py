@@ -15,7 +15,7 @@ COMMANDS = {"init", "login", "serve", "bot", "add", "list", "start", "delete", "
 
 def project_processes(commands, project_root=PROJECT_ROOT):
     """Find project CLI commands, including instances predating session locks."""
-    for entry in Path("/proc").iterdir():
+    for entry in PROC_ROOT.iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
@@ -25,18 +25,9 @@ def project_processes(commands, project_root=PROJECT_ROOT):
             continue
         if cwd != Path(project_root).resolve():
             continue
-        entrypoints = {"src.main", "tg_forwarder", "tg_forwarder.cli"}
-        index = next((i for i, arg in enumerate(argv) if arg in entrypoints or Path(arg).name == "tg-forward"), None)
-        if index is None:
-            continue
-        arguments = iter(argv[index + 1:])
-        for argument in arguments:
-            if argument in ("--env-file", "--log-level", "-l"):
-                next(arguments, None)
-            elif argument in COMMANDS:
-                if argument in commands:
-                    yield int(entry.name)
-                break
+        command = _process_command(argv, cwd)
+        if command is not None and command[0] in commands:
+            yield int(entry.name)
 
 
 def _session_path(value, project_root, environ=None):
@@ -52,10 +43,17 @@ def _session_path(value, project_root, environ=None):
     return path.resolve()
 
 
-def _process_command(argv):
-    entrypoints = {"src.main", "tg_forwarder", "tg_forwarder.cli"}
-    index = next((i for i, arg in enumerate(argv)
-        if arg in entrypoints or Path(arg).name == "tg-forward"), None)
+def _is_entrypoint(argument, cwd):
+    if argument in {"src.main", "tg_forwarder", "tg_forwarder.cli"} or Path(argument).name == "tg-forward":
+        return True
+    if Path(argument).name == "main.py":
+        root = project_path(argument, cwd).parent
+        return (root / "pyproject.toml").is_file() and (root / "src/tg_forwarder").is_dir()
+    return False
+
+
+def _process_command(argv, cwd):
+    index = next((i for i, arg in enumerate(argv) if _is_entrypoint(arg, cwd)), None)
     if index is None:
         return None
     env_file = None
@@ -130,7 +128,7 @@ def legacy_project_processes(session_path, project_root=PROJECT_ROOT):
             cwd = (entry / "cwd").resolve(strict=True)
         except (OSError, UnicodeError, RuntimeError):
             continue
-        command = _process_command(argv)
+        command = _process_command(argv, cwd)
         if command is None or command[0] not in {"bot", "serve", "start", "login"}:
             continue
         sessions = _open_sessions(entry)

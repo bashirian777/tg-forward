@@ -204,6 +204,29 @@ def test_non_session_commands_and_option_values_are_not_legacy_owners(proc, proj
     assert list(guard.legacy_project_processes(project / "data/sessions/forwarder.session", project)) == []
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("env_option", [["--env-file", "custom.env"], ["--env-file=custom.env"]])
+def test_direct_source_process_is_found_for_restart_and_session_ownership(proc, project, absolute, env_option):
+    (project / "custom.env").write_text("SESSION_PATH=accounts/direct\n")
+    entrypoint = str(project / "main.py") if absolute else "main.py"
+    pid = process(proc, project, arguments=["python", entrypoint] + env_option + ["serve"])
+    session = project / "accounts/direct.session"
+    assert list(guard.project_processes({"serve"}, project)) == [pid]
+    assert list(guard.legacy_project_processes(session, project)) == [pid]
+    with pytest.raises(ValueError, match="running with this session"):
+        with guard.session_guard(session, project_root=project):
+            pytest.fail("Direct source owner was accepted")
+
+
+def test_unrelated_main_script_is_not_a_project_service(proc, project, tmp_path):
+    script = tmp_path / "other/main.py"
+    script.parent.mkdir()
+    script.touch()
+    process(proc, project, arguments=["python", str(script), "serve"])
+    assert list(guard.project_processes({"serve"}, project)) == []
+    assert list(guard.legacy_project_processes(project / "data/sessions/forwarder.session", project)) == []
+
+
 def test_exited_or_unreadable_process_entries_are_ignored(proc, project):
     (proc / "900001").mkdir()
     assert list(guard.legacy_project_processes(project / "account", project)) == []

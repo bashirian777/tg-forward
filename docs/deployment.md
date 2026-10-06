@@ -31,25 +31,37 @@ docker compose up -d --force-recreate
 
 ## 源码日常操作
 
-前台运行使用 `.venv/bin/tg-forward serve`，按 `Ctrl+C` 停止。后台运行或重启使用：
+激活环境后直接运行源码：
 
 ```bash
-bash restart.sh
+source .venv/bin/activate
+python main.py serve
 ```
 
-后台日志位于 `data/logs/forwarder.log`：
+按 `Ctrl+C` 停止。需要后台运行时，先退出前台进程，再使用：
+
+```bash
+bash run.sh start       # 后台启动；已运行时不重复启动
+bash run.sh stop        # 停止并等待 worker 退出
+bash run.sh restart     # 重启
+bash run.sh status      # 查看运行状态
+```
+
+脚本自动使用项目的 `.venv`，无需激活环境。`restart` 先检查新配置，检查通过后才停止旧进程。后台日志位于 `data/logs/forwarder.log`：
 
 ```bash
 tail -f data/logs/forwarder.log
 ```
 
-升级时先停止服务，更新代码和依赖，重新构建前端再启动：
+升级时先停止进程，更新代码和依赖，重新构建前端再启动：
 
 ```bash
+bash run.sh stop
 git pull
-.venv/bin/pip install -e .
-.venv/bin/python -m scripts.build_frontend
-bash restart.sh
+source .venv/bin/activate
+uv pip install -r pyproject.toml
+python -m scripts.build_frontend
+bash run.sh start
 ```
 
 修改 `.env` 后重启服务生效。已有配置中 `WEB_HOST=127.0.0.1` 的安装，如需通过服务器 IP 访问，改为 `WEB_HOST=0.0.0.0`。
@@ -66,11 +78,13 @@ docker compose run --rm forwarder login --relogin
 docker compose up -d
 ```
 
-源码部署停止服务后执行：
+源码部署：
 
 ```bash
-.venv/bin/tg-forward login --relogin
-bash restart.sh
+bash run.sh stop
+source .venv/bin/activate
+python main.py login --relogin
+bash run.sh start
 ```
 
 ## 数据目录
