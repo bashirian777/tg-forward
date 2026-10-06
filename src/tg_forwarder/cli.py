@@ -86,7 +86,6 @@ def create_parser():
     login = commands.add_parser("login", help="Interactively log in to Telegram")
     login.add_argument("--relogin", action="store_true", help="Log out the old session and explicitly sign in to TG_PHONE")
     commands.add_parser("serve", help="Start Web, forwarding management and optional Bot")
-    commands.add_parser("bot", help="Alias for serve")
     add = commands.add_parser("add", help="Add a forwarding task")
     add.add_argument("task_id")
     add.add_argument("--source", "-s", type=int, required=True)

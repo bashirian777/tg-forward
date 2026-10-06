@@ -21,10 +21,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: python -m pip install -e '.[dev]'
-      - run: python -m scripts.build_release --frontend-only
+      - run: python -m scripts.build_frontend
       - run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
       - run: bash -n restart.sh
-  frontend-and-package:
+  frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,18 +37,27 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: python -m pip install -e '.[dev]'
-      - run: python -m scripts.build_release
+      - run: python -m scripts.build_frontend
       - run: npm --prefix frontend exec -- playwright install --with-deps chromium
       - run: npm --prefix frontend test
         env:
           UI_PYTHON: python
-      - run: python -m scripts.check_release dist/*.whl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: browser-results
           path: frontend/test-results/
-      - uses: actions/upload-artifact@v4
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
         with:
-          name: distributions
-          path: dist/*
+          context: .
+          load: true
+          push: false
+          tags: tg-forward:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker run --rm tg-forward:ci --help

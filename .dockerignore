@@ -1,0 +1,33 @@
+# Send only the application and frontend sources to the image builder.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!src/
+!src/tg_forwarder/
+!src/tg_forwarder/**
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/index.html
+!frontend/src/
+!frontend/src/**
+
+# Keep credentials, runtime state and local build output out of the image.
+**/.env*
+**/*.session*
+**/*.db*
+**/*.sqlite*
+**/__pycache__/
+**/*.py[cod]
+src/tg_forwarder/web/dist/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/tests/
+frontend/playwright*.ts
+**/*.tsbuildinfo

@@ -1,4 +1,4 @@
-"""Exclusive ownership of a Telegram session across CLI, server and benchmarks."""
+"""Exclusive ownership of a Telegram session across CLI and server processes."""
 from contextlib import contextmanager
 import fcntl
 import os
@@ -9,6 +9,7 @@ from tg_forwarder.config.startup import DEFAULTS, StartupConfigurationError, rea
 
 PROC_ROOT = Path("/proc")
 
+# Include removed CLI names so upgrades still recognize an older running service.
 COMMANDS = {"init", "login", "serve", "bot", "add", "list", "start", "delete", "verify-db", "migrate-env"}
 
 

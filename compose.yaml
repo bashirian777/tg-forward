@@ -1,0 +1,22 @@
+services:
+  forwarder:
+    build: .
+    image: tg-forward:local
+    user: "${DOCKER_UID:-0}:${DOCKER_GID:-0}"
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "10082"
+      DB_PATH: /app/data/forwarder.db
+      SESSION_PATH: /app/data/sessions/forwarder.session
+    ports:
+      - "127.0.0.1:10082:10082"
+    volumes:
+      - ./data:/app/data
+      - ./temp:/app/temp
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 90s

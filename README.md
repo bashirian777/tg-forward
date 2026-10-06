@@ -6,14 +6,34 @@ Web 使用 Vue 3、TypeScript 和 Vite，后端使用 Flask 与 Waitress。生�
 
 ## 安装与首次启动
 
-目前支持 Linux，Python 3.9 及以上，推荐 Python 3.12。开发和源码构建需要 Node 22.12 及以上、npm；安装已构建的 wheel 只需 Python。
+### Docker Compose（推荐）
 
-### 从源码安装
+首次部署先准备配置文件：
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+需要 Docker Engine 和 Docker Compose v2。在 `.env` 中填写从 https://my.telegram.org 获取的 `TG_API_ID`、`TG_API_HASH`、国际格式手机号 `TG_PHONE` 和首次管理密码 `WEB_INITIAL_PASSWORD`，然后在项目目录执行：
+
+```bash
+docker compose build
+docker compose run --rm forwarder init
+docker compose run --rm forwarder login
+docker compose up -d
+```
+
+`login` 交互输入 Telegram 验证码与两步验证密码。访问 `http://127.0.0.1:10082`，使用 `docker compose logs -f forwarder` 查看日志。数据库和 Telegram 会话保存在项目的 `data/`，临时续传文件保存在 `temp/`，可直接在宿主机查看和备份。Docker 部署无需在宿主机安装 Python 或 Node，配置和更新方式见[部署说明](docs/deployment.md#docker-compose)。
+
+### 从源码运行
+
+目前支持 Linux，Python 3.9 及以上，推荐 Python 3.12。安装与前端构建需要 Node 22.12 及以上和 npm；前端构建完成后，运行服务只需 Python。
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m scripts.build_release --frontend-only
+.venv/bin/pip install -e .
+.venv/bin/python -m scripts.build_frontend
 cp .env.example .env
 chmod 600 .env
 ```
@@ -27,23 +47,6 @@ chmod 600 .env
 ```
 
 访问 `http://127.0.0.1:10082`。`login` 交互输入验证码与两步验证密码；已有会话必须属于 `TG_PHONE`。`init` 重复执行保留现有设置、任务和断点。服务启动后任务默认停止，请在控制台手动启动。
-
-### 从 wheel 安装
-
-先按[发布构建说明](CONTRIBUTING.md#发布构建)生成 wheel，将它安装到目标机器的虚拟环境。以下文件名仅作示例，按实际版本替换：
-
-```bash
-mkdir -p ~/tg-forward
-cd ~/tg-forward
-python3 -m venv .venv
-.venv/bin/pip install /path/to/telegram_forwarder-0.2.0-py3-none-any.whl
-# 在这个工作目录创建 .env，内容参照仓库的 .env.example
-.venv/bin/tg-forward init
-.venv/bin/tg-forward login
-.venv/bin/tg-forward serve
-```
-
-每次从同一个工作目录启动，或在 `.env` 中使用绝对 `DB_PATH`、`SESSION_PATH`。wheel 自带 dist，不需要安装 Node、启动 Vite 或另外配置静态站点。
 
 ## 配置归属
 
@@ -60,7 +63,7 @@ python3 -m venv .venv
 | `TG_PROXY_URL` | 可选，`socks5://`、`socks4://` 或 `http://` |
 | `WEB_INITIAL_PASSWORD` | 仅首次 `init` 使用 |
 
-源码安装按项目根目录解析相对路径，改变 shell 工作目录不会切换数据源；wheel 安装按启动工作目录解析。`--env-file /absolute/path/.env` 指定环境文件，但不改变相对数据路径的基准。中文、引号、`#` 等字符可使用 dotenv 引号语法，`${NAME}` 按原文读取。
+源码运行时，相对路径按项目根目录解析，改变 shell 工作目录不会切换数据源。`--env-file /absolute/path/.env` 指定环境文件，但不改变相对数据路径的基准。中文、引号、`#` 等字符可使用 dotenv 引号语法，`${NAME}` 按原文读取。Docker 部署的路径和监听参数由 `compose.yaml` 固定，其他启动参数从 `.env` 注入。
 
 后台展示启动参数来源和连接状态，API Hash、手机号、Bot token、代理凭据只显示是否配置，不回显内容。
 
@@ -86,7 +89,7 @@ data/
 └── logs/forwarder.log          # restart.sh 使用
 ```
 
-CLI 会话锁按实际 session 文件防止登录、服务和测速同时占用 Telegram 用户会话，同目录下的独立测试 session 可并行使用。CLI 新建、删除任务需先停止服务；在线管理通过 Web 或 Bot 操作。Bot 使用内存会话。
+CLI 会话锁按实际 session 文件防止登录和服务同时占用 Telegram 用户会话。CLI 新建、删除任务需先停止服务；在线管理通过 Web 或 Bot 操作。Bot 使用内存会话。
 
 ## 管理与转发
 
@@ -115,14 +118,18 @@ CLI 会话锁按实际 session 文件防止登录、服务和测速同时占用 
 
 ## 升级、开发与验证
 
-已有 `.env`、SQLite 数据库及 Telegram 会话可继续使用。首次启动新版本自动迁移旧明文管理密码，并清理历史密码字段；旧配置仍包含部署字段的安装先执行 `migrate-env`。升级前停止旧服务，按[部署说明](docs/deployment.md)操作。旧源码命令 `python -m src.main` 和 `bot` 子命令保留兼容。
+已有 `.env`、SQLite 数据库及 Telegram 会话可继续使用。首次启动新版本自动迁移旧明文管理密码，并清理历史密码字段；旧配置仍包含部署字段的安装先执行 `migrate-env`。升级前停止旧服务，按[部署说明](docs/deployment.md)操作。
 
 ```bash
-make test
-make ui-test
-make build
+make install       # 安装 Python 开发依赖和锁定的 Node 依赖
+make frontend      # 构建前端并复制到后端静态目录
+make check         # Python 回归、前端类型和 Shell 语法检查
+npm --prefix frontend run test:browser-install
+make ui-test       # 离线浏览器回归
 ```
 
-项目按功能分包：`config`、`tasks`、`forwarding`、`telegram`、`storage`、`runtime`、`web` 和 `bot`。目录与开发命令见[贡献指南](CONTRIBUTING.md)，前端和单端口说明见[前端文档](docs/frontend.md)，验证范围见[验证记录](docs/verification.md)。
+`make dev` 启动 Vite，后端另用 `.venv/bin/tg-forward serve`。更多命令可运行 `make help` 查看。
 
-许可证尚待维护者选择；当前没有授予开源许可，发布前须按[许可证选项](docs/license-options.md)补齐 LICENSE 和包元数据。
+开发和浏览器测试说明见[前端文档](docs/frontend.md)。自动检查使用临时数据库和模拟 Telegram，不需要真实账号。
+
+许可证尚未确定，当前仓库尚未授予开源许可。
