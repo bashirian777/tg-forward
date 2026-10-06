@@ -27,8 +27,10 @@ chmod 600 .env
 | `WEB_INITIAL_PASSWORD` | 首次 Web 管理密码，已有数据库通过设置页修改 |
 | `WEB_HOST` | 监听地址，默认 `0.0.0.0` |
 | `WEB_PORT` | Web 端口，默认 `10082` |
-| `TG_BOT_TOKEN`、`TG_ADMIN_IDS` | 可选，管理 Bot 的 token 和逗号分隔的管理员 ID |
+| `TG_BOT_TOKEN`、`TG_ADMIN_IDS` | 可选，留空不影响网页管理；启用管理 Bot 时需同时填写 token 和管理员用户 ID，多个 ID 用英文逗号分隔 |
 | `TG_PROXY_URL` | 可选，Telegram 连接代理，支持 socks5、socks4 和 http |
+
+网页仅显示 Bot 的配置和连接状态，不能修改 token 或管理员 ID。后续启用或修改时，编辑 `.env`：源码部署执行 `bash run.sh restart`，Docker 部署执行 `docker compose up -d --force-recreate`。
 
 ## Docker 部署
 
